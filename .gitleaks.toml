@@ -1,0 +1,26 @@
+title = "Repository secret and privacy checks"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "personal-workstation-path"
+description = "Absolute paths can expose a local operating-system username"
+regex = '''(?i)(?:[a-z]:[\\/]{1,2}Users[\\/]{1,2}[a-z0-9_.-]+[\\/]|/(?:Users|home)/[a-z0-9_.-]+/)'''
+
+[[rules]]
+id = "discord-snowflake"
+description = "Review Discord user, server, channel and application identifiers"
+regex = '''\b[0-9]{17,22}\b'''
+
+[[rules.allowlists]]
+description = "Deliberately synthetic Discord IDs in the setup test"
+condition = "AND"
+paths = ['''^tests/setup\.test\.ts$''']
+regexes = ['''^(?:111111111111111111|222222222222222222)$''']
+
+[[rules.allowlists]]
+description = "Historical synthetic member-directory rejection fixture"
+condition = "AND"
+paths = ['''^tests/member-directory\.test\.ts$''']
+regexes = ['''^123456789012345678$''']

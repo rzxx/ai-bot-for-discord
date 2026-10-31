@@ -1,0 +1,30 @@
+diff --git a/dist/index.js b/dist/index.js
+index 63c6dfbaeb145f4ec332784ce5a80bb534fb8905..862c6c83b15f3f0493f9553b50c613b08d762399 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1156,7 +1156,9 @@ var VoiceWebSocket = class extends import_node_events4.EventEmitter {
+    */
+   constructor(address, debug) {
+     super();
+-    this.ws = new import_ws.default(address);
++    this.ws = new import_ws.default(address, globalThis.process?.versions?.bun ? {
++      proxy: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.all_proxy || process.env.ALL_PROXY
++    } : void 0);
+     this.ws.onmessage = (err) => this.onMessage(err);
+     this.ws.onopen = (err) => this.emit("open", err);
+     this.ws.onerror = (err) => this.emit("error", err instanceof Error ? err : err.error);
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 4a5678cf6efbd76a00efaa0c1218aa6fb8cccffe..d2c1aa9a8889e1674c0d656de8b5a72a2ba12f5c 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -1096,7 +1096,9 @@ var VoiceWebSocket = class extends EventEmitter4 {
+    */
+   constructor(address, debug) {
+     super();
+-    this.ws = new WebSocket(address);
++    this.ws = new WebSocket(address, globalThis.process?.versions?.bun ? {
++      proxy: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.all_proxy || process.env.ALL_PROXY
++    } : void 0);
+     this.ws.onmessage = (err) => this.onMessage(err);
+     this.ws.onopen = (err) => this.emit("open", err);
+     this.ws.onerror = (err) => this.emit("error", err instanceof Error ? err : err.error);

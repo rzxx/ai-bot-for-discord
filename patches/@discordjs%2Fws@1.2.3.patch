@@ -1,0 +1,50 @@
+diff --git a/dist/index.js b/dist/index.js
+index 106b2ec450a248cd5bd7c36c038215145438eade..4f48510d7b1d0a50a06cc1143bd2e423fd4ac0a0 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -674,9 +674,17 @@ var WebSocketShard = class extends import_async_event_emitter.AsyncEventEmitter
+     const session = await this.strategy.retrieveSessionInfo(this.id);
+     const url = `${session?.resumeURL ?? this.strategy.options.gatewayInformation.url}?${params.toString()}`;
+     this.debug([`Connecting to ${url}`]);
+-    const connection = new WebSocketConstructor(url, [], {
+-      handshakeTimeout: this.strategy.options.handshakeTimeout ?? void 0
+-    });
++    const socketOptions = {
++      handshakeTimeout: this.strategy.options.handshakeTimeout ?? void 0,
++      // Bun's WebSocket does not inherit fetch's proxy environment automatically.
++      ...(globalThis.process?.versions?.bun ? {
++        proxy: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.all_proxy || process.env.ALL_PROXY
++      } : {})
++    };
++    // Bun accepts proxy options as the second constructor argument.
++    const connection = globalThis.process?.versions?.bun
++      ? new WebSocketConstructor(url, socketOptions)
++      : new WebSocketConstructor(url, [], socketOptions);
+     connection.binaryType = "arraybuffer";
+     connection.onmessage = (event) => {
+       void this.onMessage(event.data, event.data instanceof ArrayBuffer);
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 0ebc06d477ac54303c7542261cc5bcc9a9537519..e17e77ec6b0abe4e7d572c1d59cf317df9e405f3 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -635,9 +635,17 @@ var WebSocketShard = class extends AsyncEventEmitter {
+     const session = await this.strategy.retrieveSessionInfo(this.id);
+     const url = `${session?.resumeURL ?? this.strategy.options.gatewayInformation.url}?${params.toString()}`;
+     this.debug([`Connecting to ${url}`]);
+-    const connection = new WebSocketConstructor(url, [], {
+-      handshakeTimeout: this.strategy.options.handshakeTimeout ?? void 0
+-    });
++    const socketOptions = {
++      handshakeTimeout: this.strategy.options.handshakeTimeout ?? void 0,
++      // Bun's WebSocket does not inherit fetch's proxy environment automatically.
++      ...(globalThis.process?.versions?.bun ? {
++        proxy: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.all_proxy || process.env.ALL_PROXY
++      } : {})
++    };
++    // Bun accepts proxy options as the second constructor argument.
++    const connection = globalThis.process?.versions?.bun
++      ? new WebSocketConstructor(url, socketOptions)
++      : new WebSocketConstructor(url, [], socketOptions);
+     connection.binaryType = "arraybuffer";
+     connection.onmessage = (event) => {
+       void this.onMessage(event.data, event.data instanceof ArrayBuffer);

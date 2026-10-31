@@ -1,0 +1,58 @@
+# Dependencies and Python environments
+node_modules/
+.venv/
+venv/
+
+# Build output and caches
+dist/
+build/
+coverage/
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime data and downloaded models
+/.local/
+/data/
+/models/
+/logs/
+/recordings/
+/transcripts/
+/conversations/
+/config.json
+/config.json.*
+
+# Credentials and local environment settings
+.env
+.env.*
+!.env.example
+!.env.*.example
+.npmrc
+.pypirc
+credentials
+credentials.*
+*.dpapi
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite*
+*.db
+*.db-*
+*.log
+*.log.*
+
+# Temporary and editor files
+*.tmp
+*.bak
+*.old
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
