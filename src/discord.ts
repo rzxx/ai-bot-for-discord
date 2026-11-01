@@ -17,6 +17,7 @@ import { safeName, safeText } from './tool-safety';
 import { ReminderScheduler, type Reminder } from './reminders';
 import { visiblePresence, presenceDiagnostics } from './presence';
 import { MemberDirectory } from './member-directory';
+import { ChatRetrieval } from './chat-retrieval';
 import type { Reporting } from './reporting';
 
 interface Receiver { gate: UtteranceGate; decoder?: LiveOpusDecoder; vad?: LiveVad; destroy(): void }
@@ -26,6 +27,7 @@ const privilegedContexts = [
   { key: 'memberContext', intent: GatewayIntentBits.GuildMembers, label: 'Server Members Intent' },
   { key: 'presenceContext', intent: GatewayIntentBits.GuildPresences, label: 'Presence Intent' },
   { key: 'chatContext', intent: GatewayIntentBits.MessageContent, label: 'Message Content Intent' },
+  { key: 'chatTools', intent: GatewayIntentBits.MessageContent, label: 'Message Content Intent' },
 ] as const;
 
 export async function sendRoomMessage(client: Pick<Client, 'rest'>, channel: GuildTextBasedChannel | undefined, bot: GuildMember,
@@ -129,7 +131,7 @@ export class DiscordBot {
   private gatewayError(error: unknown): unknown {
     if (!(error instanceof Error) || (error.message !== 'Used disallowed intents'
       && !('code' in error && error.code === 'DisallowedIntents'))) return error;
-    const requested = privilegedContexts.filter(context => this.client.options.intents.has(context.intent));
+    const requested = privilegedContexts.filter(context => this.config[context.key] && this.client.options.intents.has(context.intent));
     return new Error(this.t('Discord rejected the connection (4014, Used disallowed intents): a requested privileged intent is disabled or not approved. Open https://discord.com/developers/applications → your application → Bot → Privileged Gateway Intents. {0} Enable the required switches and save, or disable the corresponding features in config.json: {1}. Run bun start again.',
       requested.map(context => `${context.label} (${context.key})`).join('; '), requested.map(context => `"${context.key}": false`).join(', ')), { cause: error });
   }
@@ -178,6 +180,7 @@ export class DiscordBot {
     }, 10000);
     this.reminderTimer = setInterval(() => this.reminders.tick(), 250);
     log(this.t("Capabilities: chat={0}; presence={1}; messages={2}; reminders={3}; search={4}.", this.config.chatContext, this.config.presenceContext, this.config.messageTools, this.config.reminderTools, this.config.webSearch));
+    log(this.t('Chat retrieval: {0}; timezone: {1}.', this.config.chatTools, this.config.chatTimezone));
     log(this.t("Bot {0} ready. Model: {1} ({2}). Use /join in Discord.", this.client.user?.tag, this.config.model, this.config.reasoningEffort));
   }
   private member(member: GuildMember): Member { return { id: member.id, name: safeName(this.config.preferredNames[member.id] ?? member.displayName) }; }
@@ -300,6 +303,10 @@ export class DiscordBot {
       canUseContext: () => !this.config.chatContext || !textChannel || [...controller.members.keys()].every(id => textChannel.permissionsFor(id)?.has(PermissionFlagsBits.ViewChannel)),
       tools: {
         limits: this.toolLimits,
+        chat: this.config.chatTools ? {
+          query: (...args) => retrieval.query(...args), continuationOwner: (...args) => retrieval.continuationOwner(...args),
+          cancel: () => retrieval.cancel(), onSpeech: event => retrieval.onSpeech(event), canUseContext: () => retrieval.canUseContext(),
+        } : undefined,
         reminders: this.reminders.forRoom(member.guild.id, textChannel?.id ?? ''),
         privateTerms: () => [...member.guild.members.cache.values()].filter(p => !p.user.bot)
           .flatMap(p => [this.member(p).name, p.displayName, p.nickname, p.user.username, p.user.globalName].filter((s): s is string => !!s)),
@@ -331,6 +338,16 @@ export class DiscordBot {
         return ref;
       },
     }, { channel, audience: () => [...controller.members.keys()], presence: p => this.visibleActivity(p, session, 'lookup') });
+    const retrieval = new ChatRetrieval(member.guild, this.config, {
+      defaultChannel: textChannel?.id, audience: () => [...controller.members.keys()],
+      active: () => this.sessions.get(member.guild.id)?.controller === controller && controller.phase !== 'closed',
+      resolve: (ref, signal) => directory.resolve(ref, signal),
+      reference: id => {
+        const ref = this.brain.referenceUser?.(controller.sessionId, id);
+        if (!ref) throw new Error(this.t('Session context unavailable.'));
+        return ref;
+      },
+    }, this.toolLimits);
     const connection = joinVoiceChannel({ channelId: channel.id, guildId: member.guild.id, adapterCreator: member.guild.voiceAdapterCreator, selfDeaf: false, selfMute: false });
     const session: Session = { channel, chat: textChannel, startedAt: Date.now(), controller, player, connection, receivers: new Map(), notice };
     connection.on('stateChange', (oldState, newState) => {
@@ -385,7 +402,8 @@ export class DiscordBot {
         const received = metrics.reduce((n, m) => n + m.received, 0);
         const progress = session && d ? this.t("\nModel: {0}. Packets: {1}; active speakers: {2}; transcripts {3}/{4}; spoken {5}, silent {6}, stale {7}. STT {8} ms, model {9} ms; first text {10} ms from request; first audio {11} ms after utterance. Streaming: {12}.\nEarly endpoints {13}; local replies {14}; thinking cues {15}; backchannels {16}; revisions {17}; yielded {18}; withheld {19}.{20}", this.config.model, received, session.controller.activeSpeakers, d.transcripts, d.utterances, d.spokenReplies, d.modelPasses, d.staleReplies, d.lastSttMs, d.lastModelMs, d.lastFirstTextMs || '—', d.lastFirstAudioMs || '—', this.config.streamReplies, d.earlyEndpoints, d.localReplies, d.thinkingCues, d.backchannels, d.revisions, d.yieldedReplies, d.withheldReplies, d.lastError ? this.t(" Error: {0}", d.lastError) : '') : '';
         const capabilities = this.t("Directory: {0}. Chat context: {1}{2}. Presence: {3}. Messages: {4}; reminders: {5}; search: {6}.", this.config.memberContext, this.config.chatContext, session?.chat ? this.t(", channel #{0}", session.chat.name) : '', this.config.presenceContext, this.config.messageTools, this.config.reminderTools, this.config.webSearch);
-        await i.editReply(session ? this.t("State: {0}. Participants: {1}. Pending STT: {2}, shared queue: {3}. Voice: {4}.\n{5}\nAudio: maximum incoming packet wait {6} ms; overload drops {7}; maximum playback lag {8} ms.\n{9}{10}", this.t(states[session.controller.phase]), session.controller.members.size, session.controller.pendingSTT, this.queue.length, (VOICE_LABELS[this.config.voice] ? this.t(VOICE_LABELS[this.config.voice]!) : this.config.voice), capabilities, Math.round(maxAge), dropped, Math.round(session.player.metrics.maxSchedulerLagMs), contextStatus, progress) : this.t("Not in a voice channel. Use /join.\n{0}", capabilities)); break;
+        const retrievalStatus = this.t('Chat retrieval: {0}; timezone: {1}.', this.config.chatTools, this.config.chatTimezone);
+        await i.editReply(session ? this.t("State: {0}. Participants: {1}. Pending STT: {2}, shared queue: {3}. Voice: {4}.\n{5}\nAudio: maximum incoming packet wait {6} ms; overload drops {7}; maximum playback lag {8} ms.\n{9}{10}", this.t(states[session.controller.phase]), session.controller.members.size, session.controller.pendingSTT, this.queue.length, (VOICE_LABELS[this.config.voice] ? this.t(VOICE_LABELS[this.config.voice]!) : this.config.voice), `${capabilities} ${retrievalStatus}`, Math.round(maxAge), dropped, Math.round(session.player.metrics.maxSchedulerLagMs), contextStatus, progress) : this.t("Not in a voice channel. Use /join.\n{0}", `${capabilities} ${retrievalStatus}`)); break;
       }
       case 'name': {
         const name = i.options.getString('name', true).trim();

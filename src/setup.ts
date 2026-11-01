@@ -51,13 +51,15 @@ export async function configure(config: Config, store: Pick<CredentialStore, 're
           const updated = validateConfig({ ...viewConfig, locale: String(data.get('locale') ?? selectedLocale), allowedGuildIds: [guild], controllerUserIds: owner ? [owner] : [],
             reportTools: data.get('reports') === 'on', backgroundReports: data.get('backgroundReports') === 'on',
             memberContext: data.get('members') === 'on', presenceContext: data.get('presence') === 'on', chatContext: data.get('chat') === 'on', chatChannelId: String(data.get('chatChannel') ?? '').trim(),
+            chatTools: data.get('chatTools') === 'on', chatTimezone: String(data.get('chatTimezone') ?? viewConfig.chatTimezone).trim(),
             speechLanguage: String(data.get('speechLanguage') ?? viewConfig.speechLanguage).trim(), responseLanguage: String(data.get('responseLanguage') ?? viewConfig.responseLanguage).trim(),
             networkMode: String(data.get('networkMode') ?? config.networkMode), additionalInstructions: String(data.get('additionalInstructions') ?? config.additionalInstructions),
             botName: String(data.get('name') ?? config.botName).trim(), voice: String(data.get('voice') ?? viewConfig.voice), model: String(data.get('model') ?? '').trim() });
           await (options.persistConfig ?? saveConfig)(updated);
           if (token) await store.update(value => ({ ...value, discordToken: token }));
           setTimeout(finish, 500);
-          const invite = `https://discord.com/oauth2/authorize?client_id=${bot.id}&permissions=3148800&scope=bot%20applications.commands&guild_id=${guild}&disable_guild_select=true`;
+          const permissions = 3148800 | (updated.chatTools ? 65536 : 0);
+          const invite = `https://discord.com/oauth2/authorize?client_id=${bot.id}&permissions=${permissions}&scope=bot%20applications.commands&guild_id=${guild}&disable_guild_select=true`;
           log(t("Install the bot: {0}", invite));
           // 303 changes the form POST into a GET; credentials remain local and are
           // never included in Discord's URL. The form CSP explicitly allows this destination.

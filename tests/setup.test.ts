@@ -99,6 +99,20 @@ test('optional live context and its one text destination are explicitly configur
   });
 });
 
+test('on-demand retrieval is independent of live context and requests history permissions on install', async () => {
+  await withSetup(async f => {
+    const response = await f.submit({ chatTools: 'on', chatTimezone: 'Europe/Moscow' });
+    expect(response.status).toBe(303);
+    expect(f.saved()).toMatchObject({ chatTools: true, chatContext: false, chatTimezone: 'Europe/Moscow' });
+    const permissions = BigInt(new URL(response.headers.get('Location')!).searchParams.get('permissions')!);
+    expect(permissions & 65536n).toBe(65536n);
+  });
+  await withSetup(async f => {
+    expect((await f.submit({ chatTimezone: 'Not/A_Timezone' })).status).toBe(400);
+    expect(f.saved()).toBeUndefined();
+  });
+});
+
 test('language, conversation preferences and proxy mode persist through the local setup form', async () => {
   await withSetup(async f => {
     const response = await f.submit({ speechLanguage: 'en', responseLanguage: 'auto', networkMode: 'direct', additionalInstructions: 'Keep replies brief.' });

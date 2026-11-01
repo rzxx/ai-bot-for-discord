@@ -48,7 +48,7 @@ Search runs separately from speech. Discovery and a small number of public page 
 
 ## Data and lifetime
 
-Conversation, live chat context, tool receipts, and timers live in memory. Leaving releases the conversation. Explicit timers and message cooldowns can survive a voice-session replacement, but timers disappear when the process exits. No earlier Discord messages or personal ChatGPT history are loaded.
+Conversation, live chat context, tool receipts, and timers live in memory. Leaving releases the conversation. Explicit timers and message cooldowns can survive a voice-session replacement, but timers disappear when the process exits. No personal ChatGPT history is loaded.
 
 The default inference adapter sends selected text to OpenAI using `store: false`; provider retention remains governed by the provider. Public search queries go to DuckDuckGo. The selected speech adapter receives audio and text; the included speech worker runs locally.
 

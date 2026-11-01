@@ -1,7 +1,7 @@
 import type { LatencyRecord } from './telemetry';
 import type { TokenSource } from './token-accounting';
 
-const names = ['search', 'activity', 'members', 'message', 'remind', 'cancel_reminder', 'reminders'];
+const names = ['search', 'activity', 'members', 'message', 'remind', 'cancel_reminder', 'reminders', 'chat'];
 const number = (row: LatencyRecord | undefined, key: string) => typeof row?.[key] === 'number' ? row[key] as number : 0;
 const requestKey = (r: LatencyRecord) => `${r.session}:${r.request ?? `t${r.turn}:a${r.attempt ?? 0}`}`;
 const turnKey = (r: LatencyRecord) => `${r.session}:${r.turn}`;

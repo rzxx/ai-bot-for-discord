@@ -66,6 +66,20 @@ test('disabled reporting exposes no capability and ignores attempted submissions
   f.speak(); await f.room.tick(); expect(inbox.counters.queued).toBe(0); f.room.close(); await reporting.close();
 });
 
+test('automatic report review omits raw retrieved chat payloads', async () => {
+  const seed = deferred<import('../src/reporting').ReportSeed>();
+  const reporting = new Reporting({ inbox: new ReportInbox({ write: async () => {} }), idleMs: 0, intervalMs: 0,
+    generate: async value => { seed.resolve(value); return undefined; } });
+  const f = roomFixture(async () => ({ speak: false, text: '', report: true }), reporting);
+  (f.room as any).toolReceipt(person.id, { tool: 'chat', event: 0, status: 'ready', messages: [{ text: 'RAW_PRIVATE_CHAT_FIXTURE' }] }, false);
+  try {
+    f.speak('Лёва, запиши, что поиск работает.'); await f.room.tick();
+    const value = await seed.promise;
+    expect(JSON.stringify(value)).not.toContain('RAW_PRIVATE_CHAT_FIXTURE');
+    expect(value.evidence.some(e => e.kind === 'speech')).toBe(true);
+  } finally { f.room.close(); await reporting.close(); }
+});
+
 test('a canceled reply cannot submit a report or execute a write', async () => {
   const pending = deferred<Reply>(); const started = deferred<void>();
   const inbox = new ReportInbox({ write: async () => {} }); const reporting = new Reporting({ inbox });

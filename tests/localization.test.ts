@@ -46,6 +46,18 @@ test('only the selected instruction locale reaches the room and background revie
   expect(roomInstructions(resolveConfig({ locale: 'fr' }), snapshot)).toBe(english);
 });
 
+test('chat retrieval instructions are localized, describe read-only continuations and retain the deployment timezone', () => {
+  const en = roomInstructions(resolveConfig({ chatTools: true, chatTimezone: 'Europe/Moscow' }), snapshot);
+  const ru = roomInstructions(resolveConfig({ locale: 'ru', chatTools: true, chatTimezone: 'Europe/Moscow' }), snapshot);
+  expect(en).toContain('op:"history"'); expect(ru).toContain('op:"history"');
+  expect(en).toContain('Europe/Moscow'); expect(ru).toContain('Europe/Moscow');
+  expect(en).toContain('Tokens cannot change filters/channel or authorize writes');
+  expect(ru).toContain('Нельзя менять фильтры/канал');
+  expect(en).not.toMatch(/[А-Яа-яЁё]/); expect(ru).not.toContain('If cap contains chat');
+  expect(roomInstructions(resolveConfig({ chatTools: false }), snapshot)).not.toContain('op:"history"');
+  expect(() => resolveConfig({ chatTimezone: 'Invalid/Zone' })).toThrow('chatTimezone');
+});
+
 test('concurrent locale scopes do not leak and unknown entries fall back to English', async () => {
   const before = currentLocale();
   const replies = await Promise.all(['ru', 'en', 'de'].map(locale => withLocale(locale, async () => {

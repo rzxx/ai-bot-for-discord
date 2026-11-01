@@ -29,10 +29,11 @@ Basic voice use needs no privileged intents. Enable these only for the features 
 | Feature | Setting | Discord intent |
 | --- | --- | --- |
 | New text messages as context | `chatContext` | Message Content |
+| On-demand chat history and search | `chatTools` | Message Content |
 | Published status and activities | `presenceContext` | Presence |
 | Full directory of a small server | `memberContext` | Server Members |
 
-The shared text channel defaults to where `/join` is invoked. Set `chatChannelId` if you want a fixed destination. Every voice participant must be able to see a channel used for conversation context.
+The shared text channel defaults to where `/join` is invoked. Set `chatChannelId` if you want a fixed destination. Every voice participant must be able to see a channel used for conversation context. History retrieval also requires **Read Message History** for the bot and every voice participant.
 
 ## 3. Install speech
 

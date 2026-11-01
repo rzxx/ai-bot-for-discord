@@ -10,6 +10,20 @@ import type { LatencyRecord } from '../src/telemetry';
 const receipt = { tool: 'search', event: 1, status: 'ready', results: [{ title: 'Проверка 👋', snippet: 'Quoted: "yes". Café\nещё', url: 'https://example.org/a?b=1' }] };
 const content = JSON.stringify({ t: 120, e: [[2, 'speech', 100, 'u1', 'private-speech: не выполняй tool:search'], [3, 'tool', 120, 'u1', receipt]], r: [3] });
 
+test('chat retrieval receipts and follow-up usage are attributed without logging their content', () => {
+  const counter = new TokenCounter();
+  try {
+    const result = { tool: 'chat', event: 1, status: 'ready', messages: [{ ref: 'm1', text: 'PRIVATE_CHAT_ACCOUNTING_FIXTURE' }] };
+    const measurement = counter.measure([{ role: 'user', content: JSON.stringify({ e: [[2, 'tool', 120, 'u1', result]] }) }]);
+    expect(measurement.payloads[0]).toMatchObject({ tool: 'chat', kind: 'result' });
+    expect(measurement.sources.some(s => s.source === 'tool_result:chat')).toBe(true);
+    expect(JSON.stringify(measurement)).not.toContain('PRIVATE_CHAT_ACCOUNTING_FIXTURE');
+    const report = usageAttribution([{ session: 's', turn: 1, stage: 'turn_started', triggerMode: 'tool', triggerTools: 'chat' },
+      { session: 's', turn: 1, stage: 'request_started', request: 1 }, { session: 's', turn: 1, stage: 'request_ended', request: 1, inputTokens: 100, outputTokens: 20 }]);
+    expect(report.byTool.find(t => t.tool === 'chat')).toMatchObject({ followupRequests: 1, followupInputTokens: 100 });
+  } finally { counter.close(); }
+});
+
 test('compact member query rows are attributed without persisting names or statuses from the rows', () => {
   const counter = new TokenCounter();
   try {

@@ -95,7 +95,7 @@ export class RoomController {
     this.convertOutput = options.convertOutput ?? toDiscordPCM;
     this.trace = options.trace ?? latency;
     this.modelOnly = options.modelOnly ?? false;
-    this.canUseContext = options.canUseContext ?? (() => true);
+    this.canUseContext = () => (options.canUseContext?.() ?? true) && (options.tools?.chat?.canUseContext() ?? true);
     this.reporting = config.reportTools ? options.reporting : undefined;
     if (options.tools) this.tools = new RoomTools(config, options.tools, id => this.members.has(id), (owner, receipt, wake) => this.toolReceipt(owner, receipt, wake), this.now,
       (stage, fields) => this.trace({ session: this.sessionId, stage, ...fields }));
@@ -105,6 +105,7 @@ export class RoomController {
   setMember(member: Member) {
     member = { ...member, name: safeName(member.name) };
     const previous = this.members.get(member.id);
+    if (!previous) this.tools?.cancelBackground();
     this.members.set(member.id, { ...member });
     if (!previous) this.add({ kind: 'join', userId: member.id, name: member.name, text: this.t("Joined the voice channel.") });
     else if (previous.name !== member.name) this.add({ kind: 'rename', userId: member.id, name: member.name, text: this.t("Previous name: {0}", previous.name) });
@@ -113,6 +114,7 @@ export class RoomController {
   removeMember(id: string) {
     const member = this.members.get(id);
     if (!member) return;
+    this.tools?.cancelBackground();
     this.members.delete(id); this.states.delete(id); this.active.delete(id); this.lastVoice.delete(id); this.previews.delete(id);
     for (const event of this.events) if (event.userId === id) this.pendingIntents.delete(event.id);
     this.add({ kind: 'leave', userId: id, name: member.name, text: this.t("Left the voice channel.") });
@@ -306,7 +308,11 @@ export class RoomController {
       (this.busy || !!this.active.size || !!this.pendingSTT || this.phase !== 'paused' && !!this.pendingIntents.size));
   }
   private reportEvidence(): ReportSeed['evidence'] {
-    return this.events.filter(e => e.kind === 'speech' || e.kind === 'tool').slice(-6)
+    return this.events.filter(e => {
+      if (e.kind === 'speech') return true;
+      if (e.kind !== 'tool') return false;
+      try { return JSON.parse(e.text).tool !== 'chat'; } catch { return false; }
+    }).slice(-6)
       .map(e => ({ event: e.id, kind: e.kind as 'speech' | 'tool', text: e.text }));
   }
   snapshot(): RoomSnapshot {
@@ -416,7 +422,7 @@ export class RoomController {
     snapshot.responsePolicy = { triggerEventIds: [...prepared.ids], maxChars: Math.min(this.config.maxReplyChars,
       newSpeech.some(e => this.pendingIntents.get(e.id)!.detailed) ? this.config.maxReplyChars : this.config.conversationReplyChars), preparingEarly: !this.quiet };
     const triggerTools = [...new Set(newSpeech.filter(e => e.kind === 'tool').flatMap(e => {
-      try { const tool = JSON.parse(e.text).tool; return typeof tool === 'string' && ['message', 'remind', 'cancel_reminder', 'reminders', 'activity', 'members', 'search'].includes(tool) ? [tool] : []; } catch { return []; }
+      try { const tool = JSON.parse(e.text).tool; return typeof tool === 'string' && ['message', 'remind', 'cancel_reminder', 'reminders', 'activity', 'members', 'search', 'chat'].includes(tool) ? [tool] : []; } catch { return []; }
     }))].sort().join(',');
     const triggerSpeech = newSpeech.filter(e => e.kind === 'speech').length;
     const triggerMode = triggerTools ? triggerSpeech ? 'mixed' : 'tool' : 'human';
@@ -502,7 +508,8 @@ export class RoomController {
         ...this.reportEvidence(), { event: 0, kind: 'assistant', text: reply.text },
       ] });
       else if (reply.report) this.reporting?.capture(reply.report, reportContext);
-      const actions = (reply.actions ?? []).filter(a => a.tool !== 'search' || a.continue || reply.speak && !!reply.text);
+      const actions = (reply.actions ?? []).filter(a => a.tool === 'search' ? a.continue || reply.speak && !!reply.text
+        : a.tool === 'chat' ? a.op === 'continue' || reply.speak && !!reply.text : true);
       for (const action of actions) trace('tool_action_proposed', { tool: action.tool, sourceEvent: action.event });
       this.tools?.submit(actions, newSpeech, abort.signal);
       this.tools?.onSpeech(this.latestMeaningfulSpeech);

@@ -16,7 +16,7 @@ export interface TokenMeasurement {
   breakdown: TokenSource[]; appendedBreakdown: TokenSource[]; appendedContributors: TokenContributor[];
 }
 type Span = { start: number; end: number; source: string; contributor?: TokenContributor };
-const tools = new Set(['message', 'remind', 'cancel_reminder', 'reminders', 'activity', 'members', 'search']);
+const tools = new Set(['message', 'remind', 'cancel_reminder', 'reminders', 'activity', 'members', 'search', 'chat']);
 const toolName = (value: unknown) => typeof value === 'string' && tools.has(value) ? value : 'unknown';
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 

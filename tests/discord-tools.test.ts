@@ -170,6 +170,22 @@ test('other Discord login failures retain their original error', async () => {
   finally { await bot.stop(); }
 });
 
+test('on-demand-only chat requests Message Content without subscribing to passive messages and explains disallowed intents', async () => {
+  for (const passive of [false, true]) {
+    const config = { ...defaults, allowedGuildIds: ['guild'], chatContext: passive, chatTools: true };
+    const bot = new DiscordBot(config, { reply: async () => ({ speak: false, text: '' }) }, {} as SpeechClient);
+    expect(bot.client.options.intents.has(GatewayIntentBits.MessageContent)).toBe(true);
+    expect(bot.client.options.intents.has(GatewayIntentBits.GuildMessages)).toBe(passive);
+    bot.client.login = async () => { throw new Error('Used disallowed intents'); };
+    try {
+      const error = await bot.start('unused').then(() => undefined, error => error as Error);
+      expect(error!.message).toContain('Message Content Intent (chatTools)');
+      expect(error!.message).toContain('"chatTools": false');
+      expect(error!.message.includes('Message Content Intent (chatContext)')).toBe(passive);
+    } finally { await bot.stop(); }
+  }
+});
+
 test('live presence changes retain game details and listening activity before reaching room deltas', async () => {
   const bot = new DiscordBot({ ...defaults, presenceContext: true }, { reply: async () => ({ speak: false, text: '' }) }, {} as SpeechClient);
   const states: any[] = [];

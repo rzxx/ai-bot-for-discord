@@ -24,7 +24,7 @@ export const defaults = {
   liveVad: true,
   maxUtteranceMs: 12000, minSpeechMs: 220, speechRms: 0.006, maxSttQueue: 12,
   maxReplyChars: 650, streamReplies: true, contextMaxTokens: 200000, maxResponseAgeMs: 25000, idleDisconnectMinutes: 3,
-  memberContext: false, presenceContext: false, chatContext: false, chatChannelId: '', messageTools: true, reminderTools: true, webSearch: true,
+  memberContext: false, presenceContext: false, chatContext: false, chatTools: false, chatChannelId: '', chatTimezone: 'UTC', messageTools: true, reminderTools: true, webSearch: true,
   messageCooldownSeconds: 180, mentionCooldownSeconds: 900, searchCooldownSeconds: 30, searchTimeoutMs: 8000,
   reportTools: true, backgroundReports: true,
 };
@@ -70,7 +70,11 @@ export function validateConfig(c: Config): Config {
   if (c.contextMaxTokens < 1024 || c.contextMaxTokens > 400000) throw new Error(t("contextMaxTokens: 1024 to 400000."));
   if (c.messageCooldownSeconds < 30 || c.mentionCooldownSeconds < 60 || c.searchCooldownSeconds < 10 || c.searchTimeoutMs < 1000 || c.searchTimeoutMs > 15000) throw new Error(t("Tool cooldowns are too short or searchTimeoutMs is outside 1000–15000."));
   if (typeof c.chatChannelId !== 'string' || c.chatChannelId && !/^\d{15,22}$/.test(c.chatChannelId)) throw new Error(t("Invalid chatChannelId."));
-  for (const key of ['memberContext', 'presenceContext', 'chatContext', 'messageTools', 'reminderTools', 'webSearch', 'reportTools', 'backgroundReports'] as const) if (typeof c[key] !== 'boolean') throw new Error(t("{0} must be true or false.", key));
+  for (const key of ['memberContext', 'presenceContext', 'chatContext', 'chatTools', 'messageTools', 'reminderTools', 'webSearch', 'reportTools', 'backgroundReports'] as const) if (typeof c[key] !== 'boolean') throw new Error(t("{0} must be true or false.", key));
+  try {
+    if (typeof c.chatTimezone !== 'string' || c.chatTimezone.length > 100 || !c.chatTimezone.trim()) throw new Error();
+    new Intl.DateTimeFormat('en', { timeZone: c.chatTimezone });
+  } catch { throw new Error(t('Invalid chatTimezone; use an IANA timezone such as UTC or Europe/Moscow.')); }
   if (c.maxUtteranceMs > 30000 || c.minSpeechMs >= c.maxUtteranceMs) throw new Error(t("Invalid utterance length."));
   if (!(c.speechRms > 0 && c.speechRms < 1)) throw new Error(t("speechRms must be between 0 and 1."));
   if (!c.speechAdapter && !voicesFor(c.speechLanguage).includes(c.voice)) throw new Error(t("Unknown voice for the selected speech model."));

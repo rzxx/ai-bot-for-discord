@@ -1,5 +1,12 @@
 /** English source message → Russian. Values never translate user-supplied data. */
 export const ruMessages: Record<string, string> = {
+  'Invalid chatTimezone; use an IANA timezone such as UTC or Europe/Moscow.': 'Некорректный chatTimezone: укажите часовой пояс IANA, например UTC или Europe/Moscow.',
+  'Chat retrieval: {0}; timezone: {1}.': 'Чтение истории чата: {0}; часовой пояс: {1}.',
+  'Defaults to the channel where you use /join. Chat retrieval can read other named channels when asked.': 'По умолчанию канал команды /join. По просьбе можно читать другие явно названные каналы.',
+  'On-demand chat retrieval': 'Чтение истории чата по запросу',
+  'Enable Message Content Intent and grant Read Message History. Selected older messages are sent to the model when asked; every listener needs channel access.': 'Включите Message Content Intent и выдайте Read Message History. По запросу выбранные старые сообщения передаются модели; доступ к каналу нужен всем слушателям.',
+  'Chat timezone': 'Часовой пояс чата',
+  'IANA timezone for dates such as yesterday, for example UTC or Europe/Moscow.': 'Часовой пояс IANA для дат вроде «вчера», например UTC или Europe/Moscow.',
   "User": "Пользователь",
   "Hello! Can you hear me?": "Привет! Ты меня слышишь?",
   "(chose silence)": "(решил промолчать)",

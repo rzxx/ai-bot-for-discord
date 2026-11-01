@@ -8,6 +8,7 @@ import { ReminderScheduler, type ReminderAccess } from './reminders';
 import type { DiagnosticFields } from './telemetry';
 import { validMemberQuery, type MemberQuery, type MemberResult, type MemberResolution } from './member-directory';
 import { withAbort } from './abort';
+import { validChatQuery, type ChatQuery, type ChatAccess } from './chat-retrieval';
 
 export type ToolAction = { tool: 'message'; event: number; text: string; mentions?: string[] }
   | { tool: 'remind'; event: number; seconds: number; text: string }
@@ -15,6 +16,7 @@ export type ToolAction = { tool: 'message'; event: number; text: string; mention
   | { tool: 'reminders'; event: number }
   | { tool: 'activity'; event: number; person: string }
   | ({ tool: 'members'; event: number } & MemberQuery)
+  | ({ tool: 'chat'; event: number } & ChatQuery)
   | { tool: 'search'; event: number; query: string; continue?: string };
 interface SearchChain { owner: string; event: number; round: number; expires: number; queries: string[]; seen: SearchResult[]; next?: string }
 export interface ToolReceipt { tool: ToolAction['tool']; event: number; status: string; [key: string]: unknown }
@@ -22,6 +24,7 @@ export interface ToolHost {
   resolvePerson(reference: string): Member | undefined;
   resolveMember?(reference: string, signal: AbortSignal): Promise<MemberResolution>;
   members?(query: MemberQuery, signal: AbortSignal): Promise<MemberResult>;
+  chat?: ChatAccess;
   sendMessage(actor: string, text: string, mentions: string[], signal: AbortSignal): Promise<void>;
   activity(person: Member): { status: string; activity: string; presenceAvailable?: boolean };
   // Shared across voice sessions so /leave + /join cannot bypass message limits.
@@ -41,6 +44,7 @@ export function parseActions(value: unknown): ToolAction[] {
       case 'reminders': return true;
       case 'activity': return typeof a.person === 'string' && a.person.length > 0 && a.person.length <= 40;
       case 'members': return validMemberQuery(a);
+      case 'chat': return validChatQuery(a);
       case 'search': return typeof a.query === 'string' && a.query.length >= 3 && a.query.length <= 180
         && (a.continue === undefined || typeof a.continue === 'string' && /^q[\da-f]{8}$/.test(a.continue));
       default: return false;
@@ -70,23 +74,25 @@ export class RoomTools {
     }
   }
   get capabilities() {
-    return [...(this.host.members ? ['members'] : this.config.presenceContext ? ['activity'] : []), ...(this.config.messageTools ? ['message'] : []), ...(this.config.reminderTools ? ['remind', 'cancel_reminder', 'reminders'] : []), ...(this.config.webSearch ? ['search'] : [])];
+    return [...(this.host.members ? ['members'] : this.config.presenceContext ? ['activity'] : []), ...(this.config.chatTools && this.host.chat ? ['chat'] : []), ...(this.config.messageTools ? ['message'] : []), ...(this.config.reminderTools ? ['remind', 'cancel_reminder', 'reminders'] : []), ...(this.config.webSearch ? ['search'] : [])];
   }
   private limited(key: string, ms: number) { return this.now() - (this.host.limits.get(key) ?? -Infinity) < ms; }
   private stamp(key: string) { this.host.limits.set(key, this.now()); }
   onSpeech(event: number) {
+    this.host.chat?.onSpeech(event);
     for (const [abort, source] of this.lookups) if (event > source) abort.abort();
     if (this.chain && event > this.chain.event) this.chain = undefined;
     if (this.search && event > this.search.event) { this.search.abort.abort(); this.search = undefined; }
   }
   cancelBackground() {
+    this.host.chat?.cancel();
     for (const abort of this.lookups.keys()) abort.abort();
     this.search?.abort.abort(); this.search = undefined; this.chain = undefined;
   }
   submit(actions: ToolAction[], origins: TurnEvent[], signal: AbortSignal) {
     for (const action of parseActions(actions)) {
-      // Only search can continue an app-issued, live search chain. All other
-      // actions still require a current human speech origin.
+      // Read continuations require an app-issued token and its current receipt.
+      // They never authorize a different tool or a write.
       const origin = origins.find(e => e.id === action.event && e.kind === 'speech');
       const rejected = (reason: string, feedback = false) => {
         this.observe('tool_action_rejected', { tool: action.tool, sourceEvent: action.event, reason });
@@ -95,6 +101,15 @@ export class RoomTools {
         }
       };
       let continuation: SearchChain | undefined;
+      let chatOwner: string | undefined;
+      if (action.tool === 'chat' && action.op === 'continue') {
+        chatOwner = this.host.chat?.continuationOwner(action.token, action.event);
+        const receiptOrigin = chatOwner && origins.some(e => {
+          if (e.kind !== 'tool' || e.userId !== chatOwner) return false;
+          try { const r = JSON.parse(e.text); return r.tool === 'chat' && r.event === action.event && r.next === action.token; } catch { return false; }
+        });
+        if (!chatOwner || !receiptOrigin) { rejected('invalid_continuation'); continue; }
+      }
       if (action.tool === 'search' && action.continue) {
         const chain = this.chain;
         const receiptOrigin = origins.some(e => {
@@ -107,7 +122,7 @@ export class RoomTools {
         }
         continuation = chain;
       }
-      const actor = continuation?.owner ?? origin?.userId;
+      const actor = chatOwner ?? continuation?.owner ?? origin?.userId;
       if (!actor || !this.present(actor) || signal.aborted || this.lifetime.signal.aborted) { rejected('no_current_speaker'); continue; }
       const words = (origin?.text ?? '').toLowerCase().replaceAll('ё', 'е');
       // Interpret freeform message requests in the same model turn that heard
@@ -121,7 +136,7 @@ export class RoomTools {
       if (writes && /(?:не|нельзя|don't|do not)\s+(?:мне\s+)?(?:пиш|напиш|напис|отправ|переда|сообщ|позов|приглас|пинг|став|созда|напом|отмен|удал|убира|write|send|post|invite|remind|cancel|delete|set)/u.test(words)) { rejected('negated_request', true); continue; }
       const detail = action.tool === 'remind' ? `${action.seconds}:${safeText(action.text, 320)}`
         : action.tool === 'cancel_reminder' ? action.id : action.tool === 'activity' ? action.person
-        : action.tool === 'members' ? JSON.stringify(action) : '';
+        : action.tool === 'members' || action.tool === 'chat' ? JSON.stringify(action) : '';
       const key = `${action.event}:${action.tool}:${continuation?.next ?? detail}`;
       if (this.used.has(key)) { rejected('duplicate_action'); continue; }
       this.used.add(key);
@@ -134,7 +149,7 @@ export class RoomTools {
     const began = this.now();
     let result = 'canceled';
     this.observe('tool_job_started', { tool: action.tool, sourceEvent: action.event });
-    const lookup = ['members', 'message', 'activity'].includes(action.tool) ? new AbortController() : undefined;
+    const lookup = ['members', 'message', 'activity', 'chat'].includes(action.tool) ? new AbortController() : undefined;
     if (lookup) this.lookups.set(lookup, action.event);
     const signal = AbortSignal.any([turnSignal, this.lifetime.signal, ...(lookup ? [lookup.signal] : [])]);
     const report = (status: string, data: Record<string, unknown> = {}, wake = !['sent', 'scheduled', 'canceled'].includes(status)) => {
@@ -187,6 +202,12 @@ export class RoomTools {
       } else if (action.tool === 'members') {
         const result = await withAbort(this.host.members!(action, signal), AbortSignal.any([signal, AbortSignal.timeout(4000)]));
         signal.throwIfAborted();
+        const { status, ...data } = result;
+        report(status, data);
+      } else if (action.tool === 'chat') {
+        const result = await withAbort(this.host.chat!.query(action, owner, action.event, signal), AbortSignal.any([signal, AbortSignal.timeout(8000)]));
+        signal.throwIfAborted();
+        if (!this.present(owner) || !this.host.chat!.canUseContext()) return;
         const { status, ...data } = result;
         report(status, data);
       } else if (action.tool === 'activity') {

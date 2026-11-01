@@ -44,6 +44,57 @@ test('a new listener without text-channel access pauses retained chat context wi
   visible = true; f.room.resume(); expect(f.room.phase).toBe('idle'); f.room.close();
 });
 
+test('chat retrieval acknowledges, admits evidence, silently opens context and answers through the room loop', async () => {
+  const token = 'h' + '0'.repeat(16); let ownerEvent = 0, queries = 0;
+  const f = fixture(async s => {
+    if (f.snapshots.length === 1) { ownerEvent = s.responsePolicy!.triggerEventIds[0]!; return { speak: true, text: 'Проверю чат.', actions: [{ tool: 'chat', event: ownerEvent, op: 'history', channel: 'general' }] }; }
+    if (f.snapshots.length === 2) return { speak: false, text: '', actions: [{ tool: 'chat', event: ownerEvent, op: 'continue', token, next: 'around', message: 'm1' }] };
+    return { speak: true, text: 'Алекс прислал адрес сервера вчера.' };
+  }, async () => '', { config: { chatTools: true, chatContext: false }, tools: toolHost({ chat: {
+    query: async q => { queries++; return { status: 'ready', messages: [{ ref: 'm1', text: q.op === 'history' ? 'server address' : 'surrounding context' }], ...(queries === 1 ? { next: token } : {}) }; },
+    continuationOwner: (_token, event) => event === ownerEvent ? alice.id : undefined,
+    onSpeech() {}, cancel() {}, canUseContext: () => true,
+  } }) });
+  try {
+    f.room.transcript(alice, 'Лёва, что Алекс прислал в чат general?'); f.time();
+    const initial = f.room.tick(); await settle(); await f.room.tools!.settle();
+    expect(queries).toBe(1); expect(f.plays).toHaveLength(1);
+    f.plays[0]!.done.resolve({ completed: true, playedMs: 300 }); await initial;
+    f.time(); await f.room.tick(); await f.room.tools!.settle(); expect(queries).toBe(2); expect(f.plays).toHaveLength(1);
+    f.time(); const answer = f.room.tick(); await settle(); expect(f.plays).toHaveLength(2);
+    expect(f.snapshots[2]!.events.some(e => e.kind === 'tool' && e.text.includes('surrounding context'))).toBe(true);
+    f.plays[1]!.done.resolve({ completed: true, playedMs: 300 }); await answer;
+  } finally { f.room.close(); }
+});
+
+test('retained retrieval sources gate inference and resume even with passive chat disabled', async () => {
+  let visible = true, canceled = 0;
+  const f = fixture(undefined, async () => '', { config: { chatTools: true, chatContext: false }, tools: toolHost({ chat: {
+    query: async () => ({ status: 'empty' }), continuationOwner: () => undefined,
+    onSpeech() {}, cancel: () => { canceled++; }, canUseContext: () => visible,
+  } }) });
+  visible = false; f.room.setMember({ id: 'new-listener', name: 'New listener' });
+  expect(f.room.phase).toBe('paused'); expect(() => f.room.resume()).toThrow('access'); expect(canceled).toBeGreaterThan(0);
+  f.room.transcript(alice, 'Лёва, что было в чате?'); f.time(); await f.room.tick(); expect(f.snapshots).toHaveLength(0);
+  visible = true; f.room.resume(); expect(f.room.phase).toBe('idle'); f.room.close();
+});
+
+test('audience changes cancel pending retrieval and an ignoring host cannot return a late receipt', async () => {
+  let signal!: AbortSignal; const lookup = deferred<{ status: string; text: string }>();
+  const f = fixture(async s => ({ speak: true, text: 'Проверю.', actions: [{ tool: 'chat', event: s.responsePolicy!.triggerEventIds[0]!, op: 'history' }] }),
+    async () => '', { config: { chatTools: true }, tools: toolHost({ chat: {
+      query: async (_q, _owner, _event, s) => { signal = s; return lookup.promise; },
+      continuationOwner: () => undefined, onSpeech() {}, cancel() {}, canUseContext: () => true,
+    } }) });
+  try {
+    f.room.transcript(alice, 'Лёва, прочти чат.'); f.time(); const turn = f.room.tick(); await settle();
+    f.room.setMember({ id: 'new-listener', name: 'New listener' }); expect(signal.aborted).toBe(true);
+    await f.room.tools!.settle(); lookup.resolve({ status: 'ready', text: 'late private content' }); await settle();
+    expect(f.room.events.some(e => e.kind === 'tool' && e.text.includes('late private content'))).toBe(false);
+    f.plays[0]!.done.resolve({ completed: true, playedMs: 300 }); await turn;
+  } finally { f.room.close(); }
+});
+
 test('expired or canceled model replies cannot execute side effects', async () => {
   const pending = deferred<Reply>(); let sends = 0;
   const f = fixture(async () => pending.promise, async () => '', { tools: toolHost({ sendMessage: async () => { sends++; } }) });

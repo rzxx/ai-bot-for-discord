@@ -18,6 +18,7 @@ export class ContextWire {
     this.startedAt ??= snapshot.timeline?.sessionStartedAt ?? snapshot.now;
     const relative = (at: number) => at - this.startedAt!;
     const update: Record<string, unknown> = { t: relative(snapshot.now) };
+    if (snapshot.capabilities?.includes('chat')) update.utc = new Date(snapshot.now).toISOString();
     if (!this.initialized) { update.start = this.startedAt; update.cap = snapshot.capabilities ?? []; }
     const roster = new Map<string, Member>(snapshot.members.map(m => [m.id, m]));
     // Introduce departed speakers/chat authors too, including late STT.
