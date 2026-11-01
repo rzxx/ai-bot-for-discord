@@ -7,7 +7,8 @@ export interface ReminderAccess {
   cancel(owner: string, id: string): boolean;
 }
 
-/** Explicit future tasks, independent of conversation history. Process RAM only.
+/** Legacy one-shot fallback for standalone RoomTools without a RoomController.
+ * Its owning RoomTools closes it at session end; never inject a process-global scheduler.
  * Delivery may defer BEFORE I/O for cooldowns; uncertain sends are never retried. */
 export class ReminderScheduler {
   private reminders = new Map<string, Reminder>();

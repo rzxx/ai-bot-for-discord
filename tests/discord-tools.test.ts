@@ -1,4 +1,4 @@
-import { test, expect, setSystemTime } from 'bun:test';
+import { test, expect } from 'bun:test';
 import { Events, GatewayIntentBits, type Client, type GuildMember, type GuildTextBasedChannel } from 'discord.js';
 import { DiscordBot, sendRoomMessage } from '../src/discord';
 import { defaults } from '../src/config';
@@ -11,71 +11,6 @@ function sender() {
   const client = { rest: { post: async (route: string, options: any) => { requests.push({ route, ...options }); } } } as unknown as Pick<Client, 'rest'>;
   return { bot, channel, client, denied, requests };
 }
-
-function reminderBot() {
-  const f = sender(), spoken: unknown[] = [];
-  const bot = new DiscordBot({ ...defaults, allowedGuildIds: ['guild'] }, { reply: async () => ({ speak: false, text: '' }) }, {} as SpeechClient);
-  bot.client.rest.post = f.client.rest.post;
-  const guild = { channels: { fetch: async () => ({ ...f.channel, isTextBased: () => true }) },
-    members: { fetchMe: async () => f.bot, fetch: async () => ({ id: 'alice' }) } };
-  bot.client.guilds.cache.set('guild', guild as any);
-  let voice = false;
-  bot.sessions.set('guild', { controller: { remind: (owner: string, reminders: unknown[]) => {
-    if (!voice) return false; spoken.push({ owner, reminders }); return true;
-  }, reminderPosted: () => {} } } as any);
-  return { ...f, bot, guild, spoken, voice: (value: boolean) => { voice = value; }, close: async () => { bot.sessions.clear(); bot.reminders.close(); await bot.client.destroy(); setSystemTime(); } };
-}
-
-test('due reminders speak automatically when their owner is with the bot, without also posting', async () => {
-  const f = reminderBot();
-  try {
-    setSystemTime(100000); f.voice(true);
-    f.bot.reminders.forRoom('guild', 'chat').create('alice', 5, 'Проверь чай.', 1);
-    setSystemTime(105000); f.bot.reminders.tick(); await f.bot.reminders.settle();
-    expect(f.spoken).toHaveLength(1); expect(f.requests).toHaveLength(0);
-  } finally { await f.close(); }
-});
-
-test('absent owners receive one batched text reminder even after the voice session has ended', async () => {
-  const f = reminderBot();
-  try {
-    setSystemTime(100000);
-    const access = f.bot.reminders.forRoom('guild', 'chat');
-    access.create('alice', 5, 'Проверь чай. @everyone', 1); access.create('alice', 5, 'И духовку.', 2);
-    f.bot.sessions.clear(); // Auto-disconnect or /leave must not erase timers.
-    setSystemTime(105000); f.bot.reminders.tick(); f.bot.reminders.tick(); await f.bot.reminders.settle();
-    expect(f.requests).toHaveLength(1); expect(f.spoken).toHaveLength(0);
-    expect(f.requests[0].body.content).toBe('<@alice> Проверь чай. • И духовку.');
-    expect(f.requests[0].body.allowed_mentions).toEqual({ parse: [], users: ['alice'], replied_user: false });
-    f.bot.reminders.tick(); await f.bot.reminders.settle(); expect(f.requests).toHaveLength(1);
-  } finally { await f.close(); }
-});
-
-test('a reminder switches back to voice if the owner rejoins during the text permission check', async () => {
-  const f = reminderBot();
-  try {
-    setSystemTime(100000);
-    f.guild.members.fetch = async () => { f.voice(true); return { id: 'alice' }; };
-    f.bot.reminders.forRoom('guild', 'chat').create('alice', 5, 'Проверь чай.', 1);
-    setSystemTime(105000); f.bot.reminders.tick(); await f.bot.reminders.settle();
-    expect(f.spoken).toHaveLength(1); expect(f.requests).toHaveLength(0);
-  } finally { await f.close(); }
-});
-
-test('text reminders defer for the short notification cooldown and still enforce channel access', async () => {
-  const f = reminderBot();
-  try {
-    setSystemTime(100000); const access = f.bot.reminders.forRoom('guild', 'chat');
-    access.create('alice', 5, 'Первое.', 1);
-    setSystemTime(105000); f.bot.reminders.tick(); await f.bot.reminders.settle(); expect(f.requests).toHaveLength(1);
-    access.create('alice', 5, 'Второе.', 2);
-    setSystemTime(110000); f.bot.reminders.tick(); await f.bot.reminders.settle(); expect(f.requests).toHaveLength(1); expect(access.list('alice')).toHaveLength(1);
-    setSystemTime(115000); f.bot.reminders.tick(); await f.bot.reminders.settle(); expect(f.requests).toHaveLength(2);
-    access.create('alice', 10, 'Закрытый канал.', 3); f.denied.add('alice');
-    setSystemTime(125000); f.bot.reminders.tick(); await f.bot.reminders.settle();
-    expect(f.requests).toHaveLength(2); expect(access.list('alice')).toHaveLength(0);
-  } finally { await f.close(); }
-});
 
 test('Discord sends require current room authorization and both actor/bot channel permissions', async () => {
   const f = sender(), signal = new AbortController().signal;
@@ -130,7 +65,7 @@ test('privileged context intents are opt-in and presence only updates people in 
   expect(directory.client.options.intents.has(GatewayIntentBits.GuildMembers)).toBe(true);
   expect(directory.client.options.intents.has(GatewayIntentBits.GuildPresences)).toBe(false); await directory.client.destroy();
   const bot = new DiscordBot({ ...defaults, presenceContext: true }, brain, {} as SpeechClient), states: unknown[] = [];
-  bot.sessions.set('guild', { controller: { members: new Map([['alice', {}]]), setState: (state: unknown) => states.push(state) } } as any);
+  bot.sessions.set('guild', { controller: { members: new Map([['alice', {}]]), setState: (state: unknown) => states.push(state), presence: { update() {} } } } as any);
   const member = { id: 'alice', voice: { mute: true, deaf: false }, presence: { status: 'online', activities: [{ type: 0, name: 'Minecraft' }] } };
   bot.client.emit(Events.PresenceUpdate, null, { guild: { id: 'guild' }, member } as any);
   bot.client.emit(Events.PresenceUpdate, null, { guild: { id: 'guild' }, member: { ...member, id: 'outside-vc' } } as any);
@@ -189,7 +124,7 @@ test('on-demand-only chat requests Message Content without subscribing to passiv
 test('live presence changes retain game details and listening activity before reaching room deltas', async () => {
   const bot = new DiscordBot({ ...defaults, presenceContext: true }, { reply: async () => ({ speak: false, text: '' }) }, {} as SpeechClient);
   const states: any[] = [];
-  bot.sessions.set('guild', { controller: { members: new Map([['alice', {}]]), setState: (state: unknown) => states.push(state) } } as any);
+  bot.sessions.set('guild', { controller: { members: new Map([['alice', {}]]), setState: (state: unknown) => states.push(state), presence: { update() {} } } } as any);
   try {
     const member = { id: 'alice', voice: { mute: false, deaf: false }, presence: { status: 'online', activities: [
       { type: 0, name: 'Minecraft', details: 'Playing Survival' }, { type: 2, name: 'Spotify', details: 'Track', state: 'Artist' },

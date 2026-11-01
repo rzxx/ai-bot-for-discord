@@ -77,8 +77,15 @@ Join an ordinary server voice channel and use `/join`. Address the bot by name, 
 | `/stop` | Interrupt speech and pending work |
 | `/pause`, `/resume` | Suspend or resume participation |
 | `/status` | Inspect room state and queues |
+| `/tasks` | List, pause, resume, or cancel session tasks |
 | `/name` | Set your preferred name and pronunciation |
 | `/voice` | Choose a voice |
+
+Ask in voice for ongoing work, such as “remind me to stretch every five minutes” or “roast each new Spotify track”. You can change or cancel tasks in conversation, or use `/tasks` to find their IDs and `/tasks action:cancel id:t1` to cancel one immediately. Everyone in the voice room may manage tasks.
+
+Tasks share the current conversation and disappear on `/leave` or shutdown. `/stop` interrupts current work while keeping recurring definitions; `/pause` suspends them until `/resume`. Generated contributions consume model allowance. The **Proactive session tasks** setup switch controls whether the model can create and manage them.
+
+Spotify reactions require published activity context and Presence Intent. The bot can react only to activity Discord publishes; it cannot recover tracks missed while that activity is unavailable.
 
 Keep the host running while the bot is in use. Ctrl+C shuts down the bot and speech services. Restart after changing account, model, language, adapter, or network settings.
 

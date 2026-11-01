@@ -42,7 +42,7 @@ interface InferenceProvider {
 reply(snapshot, signal, hooks?): Promise<Reply>
 ```
 
-It receives the room snapshot and returns `{speak, text, actions?, report?}`. Translate the provider's wire format inside the adapter. The shared room protocol is available in [`src/prompts.ts`](../src/prompts.ts); use the selected locale's instructions when constructing requests.
+It receives the room snapshot and returns `{speak, text, actions?, taskResults?, report?}`. Translate the provider's wire format inside the adapter. The shared room protocol is available in [`src/prompts.ts`](../src/prompts.ts); use the selected locale's instructions when constructing requests. Preserve `taskResults` so the host can track each admitted task's outcome.
 
 Honor the turn's abort signal. If streaming through `hooks.onSentence`, the emitted text must be a prefix of the final validated reply and stay within its character limit. The host checks consistency before completing playback.
 

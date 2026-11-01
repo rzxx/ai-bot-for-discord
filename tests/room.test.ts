@@ -199,25 +199,21 @@ test('new speech also cancels a web follow-up that is already generating', async
   f.plays[1]!.done.resolve({ completed: true, playedMs: 300 }); await next; f.room.close();
 });
 
-test('a reminder uses the normal speech loop without another human utterance', async () => {
+test('a reminder uses the normal playback loop without another human utterance or inference', async () => {
   const f = fixture(async s => f.snapshots.length === 1 ? { speak: false, text: '', actions: [{ tool: 'remind', event: s.responsePolicy!.triggerEventIds[0]!, seconds: 5, text: 'Алёна, пора проверить чай!' }] }
     : { speak: true, text: 'Алёна, пора проверить чай!' }, async () => '', { tools: toolHost() });
   f.room.transcript(alice, 'Напомни мне проверить чай через пять секунд.'); f.time(); await f.room.tick();
   expect(f.plays).toHaveLength(0); f.time(5000); const due = f.room.tick(); await settle();
-  expect(f.snapshots).toHaveLength(2); expect(f.snapshots[1]!.events.some(e => e.kind === 'tool' && e.text.includes('due'))).toBe(true);
-  f.plays[0]!.done.resolve({ completed: true, playedMs: 500 }); await due; f.time(); await f.room.tick(); expect(f.snapshots).toHaveLength(2); f.room.close();
+  expect(f.snapshots).toHaveLength(1); expect(f.room.events.some(e => e.kind === 'tool' && e.text.includes('due'))).toBe(true);
+  f.plays[0]!.done.resolve({ completed: true, playedMs: 500 }); await due; f.time(); await f.room.tick(); expect(f.snapshots).toHaveLength(1); f.room.close();
 });
 
-test('a process timer result wakes a fresh room, but cannot run another privileged action', async () => {
-  let sends = 0;
-  const f = fixture(async s => ({ speak: true, text: 'Алёна, пора проверить чай!', actions: [{ tool: 'message', event: s.responsePolicy!.triggerEventIds[0]!, text: 'Не должно отправиться' }] }),
-    async () => '', { tools: toolHost({ sendMessage: async () => { sends++; } }) });
-  expect(f.room.remind(alice.id, [{ id: 'r100', text: 'Проверь чай.' }])).toBe(true);
-  f.time(); const task = f.room.tick(); await settle();
-  expect(f.snapshots).toHaveLength(1); expect(f.plays).toHaveLength(1); expect(f.snapshots[0]!.events.some(e => e.kind === 'speech')).toBe(false);
-  await f.room.tools!.settle(); expect(sends).toBe(0);
-  f.plays[0]!.done.resolve({ completed: true, playedMs: 500 }); await task;
-  f.room.removeMember(alice.id); expect(f.room.remind(alice.id, [{ id: 'r101', text: 'Ещё одно.' }])).toBe(false); f.room.close();
+test('leaving discards scheduled reminders instead of injecting them into a fresh session', async () => {
+  const f = fixture(async s => ({ speak: false, text: '', actions: [{ tool: 'remind', event: s.responsePolicy!.triggerEventIds[0]!, seconds: 5, text: 'Water' }] }),
+    async () => '', { tools: toolHost() });
+  f.room.transcript(alice, 'Remind me about water'); f.time(); await f.room.tick();
+  expect(f.room.tasks.list()).toHaveLength(1); f.room.close(); expect(f.room.tasks.list()).toEqual([]);
+  const next = fixture(); next.time(10000); await next.room.tick(); expect(next.snapshots).toHaveLength(0); next.room.close();
 });
 
 test('live text chat is bounded, sanitized background and never triggers inference by itself', async () => {

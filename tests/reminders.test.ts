@@ -15,21 +15,16 @@ test('due timers batch once by owner and destination and never overlap or repeat
   scheduler.close();
 });
 
-test('an explicitly requested reminder survives voice-tool teardown but not process shutdown', async () => {
-  let now = 0; const delivered: Reminder[][] = [];
-  const scheduler = new ReminderScheduler(async reminders => { delivered.push(reminders); return 'done'; }, () => now);
-  const access = scheduler.forRoom('guild', 'chat');
+test('explicit reminders are destroyed by voice-tool teardown and cannot reach a later session', async () => {
+  let now = 0; const receipts: unknown[] = [];
   const tools = new RoomTools(defaults, { limits: new Map(), resolvePerson: () => undefined, sendMessage: async () => {},
-    activity: () => ({ status: '', activity: '' }), reminders: access }, () => true, () => {}, () => now);
-  tools.submit([{ tool: 'remind', event: 1, seconds: 5, text: 'Проверь чай.' }], [{ id: 1, kind: 'speech', at: 0, userId: 'alice', text: 'Напомни мне проверить чай.' }], new AbortController().signal);
-  await tools.settle(); tools.close();
-  now = 5000; scheduler.tick(); await scheduler.settle();
-  expect(delivered).toHaveLength(1); expect(delivered[0]![0]).toMatchObject({ owner: 'alice', destination: 'chat', text: 'Проверь чай.' });
-  access.create('alice', 5, 'Ещё одно.', 2); scheduler.close(); now += 5000; scheduler.tick(); expect(delivered).toHaveLength(1);
-  const fresh = new ReminderScheduler(async () => 'done'); expect(fresh.forRoom('guild', 'chat').list('alice')).toEqual([]); fresh.close();
+    activity: () => ({ status: '', activity: '' }) }, () => true, (_owner, receipt) => receipts.push(receipt), () => now);
+  tools.submit([{ tool: 'remind', event: 1, seconds: 5, text: 'Water' }], [{ id: 1, kind: 'speech', at: 0, userId: 'alice', text: 'Remind me about water' }], new AbortController().signal);
+  await tools.settle(); expect(receipts).toHaveLength(1); tools.close();
+  now = 5000; tools.tick(); await tools.settle(); expect(receipts).toHaveLength(1);
 });
 
-test('reminders are private to their owner/guild, bounded, and cancellable from a later voice session', () => {
+test('standalone reminder handles are scoped, owner-bound, bounded and cancellable within their lifetime', () => {
   const scheduler = new ReminderScheduler(async () => 'done', () => 0);
   const oldRoom = scheduler.forRoom('guild', 'chat'), newRoom = scheduler.forRoom('guild', 'new-chat');
   const reminder = oldRoom.create('alice', 5, '@everyone https://host.test/ Проверить чай.', 1)!;

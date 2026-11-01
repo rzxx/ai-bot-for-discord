@@ -42,13 +42,15 @@ The model proposes actions; the host executes them after validating a completed 
 
 Message sends check the requester's presence, both sides' channel permissions, individual recipients, cooldowns, and cancellation. The destination is the session's bound text channel. Ambiguous names return candidates instead of choosing someone. Discord writes use an abortable request and nonce to avoid duplicate sends on transport retries.
 
-Reminders belong to their requester. When due, the regular voice loop speaks them if their owner is present; otherwise the scheduler posts their prepared text to the original channel after checking access again. Due reminders cannot authorize another action.
+Reminders and proactive tasks belong to the current voice session. Time, activity changes, and held conditions create bounded work opportunities. Observers keep unchanged checks outside model history. The room batches compatible work into its existing conversation; later task steps append only new observations and receipts. Prepared reminders can use playback directly without inference.
+
+Task research has its own lifetime and can continue while humans talk. Its results wait for admission through the same model writer and playback path. Host-issued grants bind tools to an occurrence and task revision; edits, cancellation, pause, and session teardown revoke them. Audience and conditions are checked again before delivery. Limits and expiry bound the backlog, and uncertain message sends are not retried. [Setup](setup.md#5-try-a-conversation) covers user controls; task types and limits live in `src/tasks.ts` and `src/config.ts`.
 
 Search runs separately from speech. Discovery and a small number of public page reads return bounded excerpts. Retrieved text is evidence, never instructions. A single-use receipt token can authorize a refined search on the same question, within a short bounded chain; it cannot authorize a message or other write. New conversation invalidates that continuation.
 
 ## Data and lifetime
 
-Conversation, live chat context, tool receipts, and timers live in memory. Leaving releases the conversation. Explicit timers and message cooldowns can survive a voice-session replacement, but timers disappear when the process exits. No personal ChatGPT history is loaded.
+Conversation, live chat context, tool receipts, timers, tasks, observations, and research caches live in memory. Leaving releases all session state, including explicit reminders and recurring tasks. Only existing message cooldowns survive voice-session replacement. No task persistence or personal ChatGPT history is loaded.
 
 The default inference adapter sends selected text to OpenAI using `store: false`; provider retention remains governed by the provider. Public search queries go to DuckDuckGo. The selected speech adapter receives audio and text; the included speech worker runs locally.
 
@@ -69,6 +71,7 @@ Settings and generated files live outside Git: `config.json`, `.local/`, and `mo
 | Discord sessions and commands | `src/discord.ts` |
 | Capture, decoding, speech detection | `src/audio.ts`, `src/live-decoder.ts`, `src/live-vad.ts` |
 | Turn scheduling and local hints | `src/room.ts`, `src/conversation.ts` |
+| Proactive tasks and observation/research adapters | `src/tasks.ts`, `src/task-presence.ts`, `src/task-research.ts`, `src/task-instructions.ts` |
 | Agent instructions | `src/prompts.ts` |
 | Localization and speech defaults | `src/locale.ts`, `src/locales/`, `src/speech-presets.ts` |
 | Inference and context | `src/llm.ts`, `src/context.ts`, `src/context-wire.ts`, `src/responses-transport.ts` |

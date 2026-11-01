@@ -50,6 +50,7 @@ export async function configure(config: Config, store: Pick<CredentialStore, 're
           if (!bot.bot || !/^\d{15,22}$/.test(bot.id)) throw new Error(t("A Discord bot token is required."));
           const updated = validateConfig({ ...viewConfig, locale: String(data.get('locale') ?? selectedLocale), allowedGuildIds: [guild], controllerUserIds: owner ? [owner] : [],
             reportTools: data.get('reports') === 'on', backgroundReports: data.get('backgroundReports') === 'on',
+            taskTools: data.get('tasks') === 'on',
             memberContext: data.get('members') === 'on', presenceContext: data.get('presence') === 'on', chatContext: data.get('chat') === 'on', chatChannelId: String(data.get('chatChannel') ?? '').trim(),
             chatTools: data.get('chatTools') === 'on', chatTimezone: String(data.get('chatTimezone') ?? viewConfig.chatTimezone).trim(),
             speechLanguage: String(data.get('speechLanguage') ?? viewConfig.speechLanguage).trim(), responseLanguage: String(data.get('responseLanguage') ?? viewConfig.responseLanguage).trim(),

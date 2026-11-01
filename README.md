@@ -13,7 +13,7 @@ This project connects speech recognition, model inference, tools, and speech syn
 - **Give people control.** New speech, corrections, pause, and stop can cancel work throughout the pipeline.
 - **Keep tool permissions in the host.** The model proposes actions. The harness checks the speaker, channel access, limits, and cancellation before executing them.
 
-The included tools handle messages, reminders, member lookups, and public search. Optional chat and presence context help the agent follow what's happening around it.
+The included tools handle messages, reminders, member lookups, public search, and proactive tasks such as recurring reminders or reactions to music. Optional chat and presence context help the agent follow what's happening around it.
 
 ## Get it running
 

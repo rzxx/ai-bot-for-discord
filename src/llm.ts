@@ -11,6 +11,7 @@ import { diagnosticsEnabled, latency } from './telemetry';
 import { measureRequestTokens, releaseTokenAccounting } from './token-accounting';
 import { parseReport, type ReportDraft } from './reports';
 import type { ReportSeed } from './reporting';
+import { parseTaskResults, type TaskResult } from './tasks';
 
 export interface Member { id: string; name: string }
 export interface TurnEvent { id: number; at: number; end?: number; playedMs?: number; kind: 'speech' | 'join' | 'leave' | 'rename' | 'assistant' | 'interrupted' | 'chat' | 'tool'; userId?: string; name?: string; text: string; attention?: string; replyTo?: number }
@@ -22,7 +23,7 @@ export interface RoomSnapshot {
   states?: MemberState[];
   capabilities?: string[];
 }
-export interface Reply { speak: boolean; text: string; actions?: ToolAction[]; report?: ReportDraft | true }
+export interface Reply { speak: boolean; text: string; actions?: ToolAction[]; taskResults?: TaskResult[]; report?: ReportDraft | true }
 export interface BrainTiming {
   [key: string]: string | number | boolean | null | undefined;
   stage: string; elapsedMs: number; attempt: number; compaction: boolean;
@@ -77,7 +78,8 @@ export function cleanReply(value: unknown, maxChars: number): Reply {
   const raw = (value as Reply).text.replace(/<[^>]*>/g, '').replace(/[`*_#]/g, '').trim();
   const actions = parseActions((value as Reply).actions);
   const report = (value as Reply).report === true ? true : parseReport((value as Reply).report);
-  const extra = { ...(actions.length ? { actions } : {}), ...(report ? { report: report as ReportDraft | true } : {}) };
+  const taskResults = parseTaskResults((value as Reply).taskResults);
+  const extra = { ...(actions.length ? { actions } : {}), ...(taskResults.length ? { taskResults } : {}), ...(report ? { report: report as ReportDraft | true } : {}) };
   if (!raw || !(value as Reply).speak) return { speak: false, text: '', ...extra };
   let text = raw;
   if (raw.length > maxChars) {

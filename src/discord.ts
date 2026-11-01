@@ -14,7 +14,6 @@ import { LiveVad } from './live-vad';
 import { latency, diagnosticsEnabled, diagnosticFileStatus } from './telemetry';
 import { voiceSnapshot } from './voice-diagnostics';
 import { safeName, safeText } from './tool-safety';
-import { ReminderScheduler, type Reminder } from './reminders';
 import { visiblePresence, presenceDiagnostics } from './presence';
 import { MemberDirectory } from './member-directory';
 import { ChatRetrieval } from './chat-retrieval';
@@ -58,6 +57,10 @@ export function roomCommands(config: Config) {
     new SlashCommandBuilder().setName('pause').setDescription(t("Pause recognition and replies")),
     new SlashCommandBuilder().setName('resume').setDescription(t("Resume the conversation")),
     new SlashCommandBuilder().setName('status').setDescription(t("Show room state and speech queues")),
+    new SlashCommandBuilder().setName('tasks').setDescription(t('Manage tasks for this voice session'))
+      .addStringOption(o => o.setName('action').setDescription(t('Task action')).addChoices(
+        ...['list', 'pause', 'resume', 'cancel'].map(value => ({ name: value, value }))))
+      .addStringOption(o => o.setName('id').setDescription(t('Task identifier')).setMaxLength(12)),
     new SlashCommandBuilder().setName('name').setDescription(t("Set your preferred name"))
       .addStringOption(o => o.setName('name').setDescription(t("Your preferred name")).setRequired(true).setMaxLength(40))
       .addStringOption(o => o.setName('pronunciation').setDescription(t("Optional phonetic spelling for the selected speech model")).setMaxLength(60)),
@@ -69,7 +72,7 @@ export function roomCommands(config: Config) {
         return config.speechAdapter || voices.length > 25 ? o : o.addChoices(...voices.map(value => ({ name: VOICE_LABELS[value] ?? value, name_localizations: { ru: translate('ru', VOICE_LABELS[value] ?? value) }, value })));
       }),
   ].map(c => {
-    const names: Record<string, string> = { join: 'войти', leave: 'выйти', stop: 'стоп', pause: 'пауза', resume: 'продолжить', status: 'статус', name: 'имя', voice: 'голос' };
+    const names: Record<string, string> = { join: 'войти', leave: 'выйти', stop: 'стоп', pause: 'пауза', resume: 'продолжить', status: 'статус', tasks: 'задачи', name: 'имя', voice: 'голос' };
     const command = c.setNameLocalizations({ ru: names[c.name]! }).setDescriptionLocalizations({ ru: translate('ru', c.description) }).setDMPermission(false).toJSON();
     for (const option of command.options ?? []) option.description_localizations = { ru: translate('ru', option.description) };
     return command;
@@ -81,9 +84,7 @@ export class DiscordBot {
   readonly client: Client;
   readonly sessions = new Map<string, Session>();
   readonly queue: TaskQueue;
-  readonly reminders: ReminderScheduler;
   private housekeeping?: ReturnType<typeof setInterval>;
-  private reminderTimer?: ReturnType<typeof setInterval>;
   private lastMaintenanceAt = 0;
   private toolLimits = new Map<string, number>();
   constructor(readonly config: Config, readonly brain: Brain, readonly speech: SpeechServices, readonly reporting?: Reporting) {
@@ -93,7 +94,6 @@ export class DiscordBot {
       // Live messages only; never retain a Discord message-history cache.
       makeCache: Options.cacheWithLimits({ ...Options.DefaultMakeCacheSettings, MessageManager: 0 }) });
     this.queue = new TaskQueue(config.maxSttQueue);
-    this.reminders = new ReminderScheduler((reminders, signal) => this.deliverReminders(reminders, signal));
     this.client.on(Events.Error, error => log(safeError(this.gatewayError(error))));
     this.client.on(Events.ShardError, error => log(this.t("Discord gateway: {0}", safeError(this.gatewayError(error)))));
     this.client.on(Events.InteractionCreate, i => { if (i.isChatInputCommand()) void withLocale(config.locale, () => this.command(i).catch(error => this.commandError(i, error))); });
@@ -178,7 +178,6 @@ export class DiscordBot {
         }
       }
     }, 10000);
-    this.reminderTimer = setInterval(() => this.reminders.tick(), 250);
     log(this.t("Capabilities: chat={0}; presence={1}; messages={2}; reminders={3}; search={4}.", this.config.chatContext, this.config.presenceContext, this.config.messageTools, this.config.reminderTools, this.config.webSearch));
     log(this.t('Chat retrieval: {0}; timezone: {1}.', this.config.chatTools, this.config.chatTimezone));
     log(this.t("Bot {0} ready. Model: {1} ({2}). Use /join in Discord.", this.client.user?.tag, this.config.model, this.config.reasoningEffort));
@@ -204,36 +203,7 @@ export class DiscordBot {
   private updateState(session: Session, member: GuildMember) {
     const { status, activity } = this.visibleActivity(member, session);
     session.controller.setState({ userId: member.id, status, activity, muted: member.voice.mute ?? false, deafened: member.voice.deaf ?? false });
-  }
-  private async deliverReminders(reminders: Reminder[], signal: AbortSignal): Promise<'done' | 'defer'> {
-    const first = reminders[0]!;
-    const speak = () => this.sessions.get(first.scope)?.controller.remind(first.owner, reminders) ?? false;
-    signal.throwIfAborted();
-    if (speak()) return 'done';
-    if (!first.destination || !this.config.allowedGuildIds.includes(first.scope)) return 'done';
-    const limited = () => Date.now() - (this.toolLimits.get('message:room') ?? -Infinity) < 10000
-      || Date.now() - (this.toolLimits.get(`reminder:${first.owner}`) ?? -Infinity) < 10000;
-    if (limited()) return 'defer';
-    const guild = this.client.guilds.cache.get(first.scope);
-    if (!guild) return 'done';
-    const [channel, me] = await Promise.all([
-      guild.channels.fetch(first.destination), guild.members.fetchMe(),
-      // Recheck membership/roles when a delayed notification is actually due.
-      guild.members.fetch({ user: first.owner, force: true }),
-    ]);
-    signal.throwIfAborted();
-    // Someone may have rejoined while Discord permissions were being fetched.
-    if (speak()) return 'done';
-    if (limited()) return 'defer';
-    this.toolLimits.set('message:room', Date.now());
-    this.toolLimits.set(`reminder:${first.owner}`, Date.now());
-    this.toolLimits.set(`mention:${first.owner}`, Date.now());
-    // This is the one notification already requested by its owner, not a new
-    // model-authored message action. Only the owner can receive its mention.
-    await sendRoomMessage(this.client, channel?.isTextBased() ? channel as GuildTextBasedChannel : undefined, me,
-      first.owner, reminders.map(r => r.text).join(' • '), [first.owner], signal, () => !signal.aborted, 1800);
-    this.sessions.get(first.scope)?.controller.reminderPosted(first.owner, reminders);
-    return 'done';
+    if (this.config.presenceContext) session.controller.presence.update(member.id, member.presence, activity);
   }
   private attach(session: Session, member: GuildMember) {
     session.controller.setMember(this.member(member));
@@ -307,7 +277,6 @@ export class DiscordBot {
           query: (...args) => retrieval.query(...args), continuationOwner: (...args) => retrieval.continuationOwner(...args),
           cancel: () => retrieval.cancel(), onSpeech: event => retrieval.onSpeech(event), canUseContext: () => retrieval.canUseContext(),
         } : undefined,
-        reminders: this.reminders.forRoom(member.guild.id, textChannel?.id ?? ''),
         privateTerms: () => [...member.guild.members.cache.values()].filter(p => !p.user.bot)
           .flatMap(p => [this.member(p).name, p.displayName, p.nickname, p.user.username, p.user.globalName].filter((s): s is string => !!s)),
         members: (query, signal) => directory.query(query, signal),
@@ -391,6 +360,21 @@ export class DiscordBot {
       case 'stop': session?.controller.stop(); await i.editReply(this.t("Reply stopped.")); break;
       case 'pause': session?.controller.pause(); for (const r of session?.receivers.values() ?? []) r.gate.flush(); await i.editReply(this.t("Recognition and replies paused.")); break;
       case 'resume': session?.controller.resume(); await i.editReply(this.t("Conversation resumed.")); break;
+      case 'tasks': {
+        if (!session) { await i.editReply(this.t('No tasks in this session.')); break; }
+        const action = i.options.getString('action') ?? 'list';
+        if (action === 'list') {
+          const tasks = session.controller.tasks.list();
+          const text = tasks.map(task => `${task.id}: ${task.intent} (${task.state}, ${task.pendingRuns})`).join('\n');
+          await i.editReply({ content: text.slice(0, 1800) || this.t('No tasks in this session.'), allowedMentions: { parse: [] } });
+        } else {
+          const id = i.options.getString('id');
+          if (!id || !['pause', 'resume', 'cancel'].includes(action)) throw new Error(this.t('Specify a task identifier.'));
+          const ok = session.controller.manageTask(member.id, id, action as 'pause' | 'resume' | 'cancel');
+          await i.editReply(ok ? this.t('Task updated: {0}.', id) : this.t('Unknown task: {0}.', id));
+        }
+        break;
+      }
       case 'status': {
         const states = { idle: 'listening', thinking: 'thinking', synthesizing: 'synthesizing', ready: 'waiting for a pause', speaking: 'speaking', paused: 'paused', closed: 'disconnected' };
         const metrics = [...session?.receivers.values() ?? []].map(r => r.decoder?.metrics).filter(m => m !== undefined);
@@ -432,5 +416,5 @@ export class DiscordBot {
     session.connection.destroy();
   }
   pauseAll(reason: string) { for (const session of this.sessions.values()) { session.controller.pause(); session.notice(reason); } }
-  async stop() { clearInterval(this.housekeeping); clearInterval(this.reminderTimer); this.reminders.close(); for (const id of [...this.sessions.keys()]) this.leave(id); await this.client.destroy(); await this.reporting?.close(); }
+  async stop() { clearInterval(this.housekeeping); for (const id of [...this.sessions.keys()]) this.leave(id); await this.client.destroy(); await this.reporting?.close(); }
 }

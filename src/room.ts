@@ -7,7 +7,6 @@ import type { Brain, Member, MemberState, TurnEvent, RoomSnapshot } from './llm'
 import { ContextLimitError } from './context';
 import { RoomTools, type ToolHost, type ToolReceipt } from './room-tools';
 import { safeName, safeText } from './tool-safety';
-import type { Reminder } from './reminders';
 import type { Transcriber, Speaker } from './speech';
 import { TaskQueue } from './queue';
 import { VoiceOutput } from './voice-output';
@@ -15,6 +14,8 @@ import { latency, type LatencyRecord, type DiagnosticFields } from './telemetry'
 import { speechIntent, thinkingCueText, type SpeechIntent } from './conversation';
 import { trimSpeechPadding } from './speech-cadence';
 import type { Reporting, ReportSeed } from './reporting';
+import { TaskRuntime, taskLimits, type TaskEnvironment, type TaskRun, type TaskResult } from './tasks';
+import { TaskPresence } from './task-presence';
 
 export interface Playback { completed: boolean; playedMs: number; startedAt?: number; endedAt?: number; error?: Error; streamWaitMs?: number }
 export interface PlaybackHooks { beforeStart?: () => Promise<void>; onStart?: (at: number) => void; onTiming?: (stage: string, elapsedMs: number, chunk: number) => void; onDiagnostic?: (stage: string, fields: DiagnosticFields) => void }
@@ -28,6 +29,7 @@ interface PreparedTurn {
   abort: AbortController; ids: number[]; sources: Set<string>; started: number;
   addressed: boolean; audible: boolean; answerReady: boolean; superseded: boolean;
   cueAbort?: AbortController; cueTask?: Promise<void>; cueTimer?: ReturnType<typeof setTimeout>; cueStarted?: boolean;
+  taskRuns?: TaskRun[]; taskOnly?: boolean;
 }
 class FloorUnavailable extends Error {}
 interface RoomOptions {
@@ -48,6 +50,8 @@ export class RoomController {
   readonly members = new Map<string, Member>();
   readonly events: TurnEvent[] = [];
   readonly tools?: RoomTools;
+  readonly tasks: TaskRuntime;
+  readonly presence: TaskPresence;
   private states = new Map<string, MemberState>();
   private lastChat = new Map<string, number>();
   private followups = new Map<number, { source: number; expires: number; transient: boolean }>();
@@ -97,8 +101,15 @@ export class RoomController {
     this.modelOnly = options.modelOnly ?? false;
     this.canUseContext = () => (options.canUseContext?.() ?? true) && (options.tools?.chat?.canUseContext() ?? true);
     this.reporting = config.reportTools ? options.reporting : undefined;
+    this.tasks = new TaskRuntime({ ...taskLimits, maxTasks: config.taskMaxTasks, maxPending: config.taskMaxPending,
+      modelIntervalMs: config.taskModelIntervalSeconds * 1000, hourlyModelLimit: config.taskHourlyModelLimit,
+      speechCooldownMs: config.taskSpeechCooldownSeconds * 1000 }, this.now, (owner, receipt) => {
+        if (this.phase !== 'closed') this.add({ kind: 'tool', userId: owner, text: JSON.stringify(receipt) });
+        this.trace({ session: this.sessionId, stage: 'task_outcome', status: String(receipt.status) });
+      });
+    this.presence = new TaskPresence(observation => this.tasks.observe(observation), this.now);
     if (options.tools) this.tools = new RoomTools(config, options.tools, id => this.members.has(id), (owner, receipt, wake) => this.toolReceipt(owner, receipt, wake), this.now,
-      (stage, fields) => this.trace({ session: this.sessionId, stage, ...fields }));
+      (stage, fields) => this.trace({ session: this.sessionId, stage, ...fields }), this.tasks, () => this.taskEnvironment());
     void this.brain.warm?.(this.sessionId).catch(() => {});
     if (options.autoTick !== false) this.timer = setInterval(() => { void this.tick(); }, 100);
   }
@@ -107,7 +118,10 @@ export class RoomController {
     const previous = this.members.get(member.id);
     if (!previous) this.tools?.cancelBackground();
     this.members.set(member.id, { ...member });
-    if (!previous) this.add({ kind: 'join', userId: member.id, name: member.name, text: this.t("Joined the voice channel.") });
+    if (!previous) {
+      this.add({ kind: 'join', userId: member.id, name: member.name, text: this.t("Joined the voice channel.") });
+      this.tasks.observe({ source: 'voice.join', subject: member.id, key: String(this.sequence), data: { name: member.name } });
+    }
     else if (previous.name !== member.name) this.add({ kind: 'rename', userId: member.id, name: member.name, text: this.t("Previous name: {0}", previous.name) });
     if (!this.canUseContext()) { this.pause(); this.notice(this.t("A VC participant cannot access the chat context. Replies paused; check channel permissions before /resume.")); }
   }
@@ -118,6 +132,9 @@ export class RoomController {
     this.members.delete(id); this.states.delete(id); this.active.delete(id); this.lastVoice.delete(id); this.previews.delete(id);
     for (const event of this.events) if (event.userId === id) this.pendingIntents.delete(event.id);
     this.add({ kind: 'leave', userId: id, name: member.name, text: this.t("Left the voice channel.") });
+    this.tasks.observe({ source: 'voice.leave', subject: id, key: String(this.sequence), data: { name: member.name } });
+    this.presence.update(id, null, ''); this.presence.forget(id);
+    this.invalidateTasks();
   }
   setState(state: MemberState) {
     if (this.members.has(state.userId)) this.states.set(state.userId, { ...state, status: safeText(state.status ?? '', 16), activity: safeText(state.activity ?? '', 160) });
@@ -130,6 +147,7 @@ export class RoomController {
     if (!clean) return;
     this.lastChat.set(member.id, at);
     this.add({ at, kind: 'chat', userId: member.id, name: safeName(member.name), text: clean });
+    this.tasks.observe({ source: 'chat', subject: member.id, key: String(this.sequence), at, data: { text: clean.slice(0, 200), name: safeName(member.name) } });
   }
   private toolReceipt(owner: string, receipt: ToolReceipt, wake: boolean) {
     if (this.phase === 'closed') return;
@@ -146,22 +164,22 @@ export class RoomController {
     this.followups.set(event, { source: receipt.event, expires: this.now() + (dueReminder ? 60000 : 12000), transient: !dueReminder });
     this.pendingIntents.set(event, { kind: 'request', addressed: false, complete: true, detailed: false, stop: false, normalized: '' });
   }
-  remind(owner: string, reminders: Pick<Reminder, 'id' | 'text'>[]): boolean {
-    if (!this.members.has(owner) || this.phase === 'paused' || this.phase === 'closed' || !this.canUseContext()) return false;
-    // A timer from an earlier voice session carries its own prepared text,
-    // never an old transcript or an authority-bearing human event reference.
-    for (const reminder of reminders) this.toolReceipt(owner, { tool: 'remind', event: 0, status: 'due', id: reminder.id, text: reminder.text }, true);
-    return true;
-  }
-  reminderPosted(owner: string, reminders: Pick<Reminder, 'id'>[]) {
-    for (const reminder of reminders) this.toolReceipt(owner, { tool: 'remind', event: 0, status: 'sent', id: reminder.id }, false);
+  manageTask(actor: string, id: string, op: 'pause' | 'resume' | 'cancel'): boolean {
+    const result = this.tasks.manage(id, op);
+    if (result) {
+      this.add({ kind: 'tool', userId: actor, text: JSON.stringify({ tool: 'tasks', id, status: op === 'cancel' ? 'canceled' : op === 'pause' ? 'paused' : 'resumed' }) });
+      this.invalidateTasks();
+    }
+    return result;
   }
   activity(id: string, speaking: boolean, at = this.now()) {
     if (this.phase === 'closed') return;
     if (speaking) this.preparing?.cueAbort?.abort(); // Optional thinking sounds yield to any real speech.
+    if (speaking && this.preparing?.taskOnly) this.yieldProactive();
     if (speaking) { this.active.add(id); this.lastHumanAt = Math.max(at, this.lastHumanAt); }
     else { this.active.delete(id); this.lastHumanAt = Math.max(at, this.lastHumanAt); }
     this.lastVoice.set(id, Math.max(at, this.lastVoice.get(id) ?? 0));
+    this.tasks.tick(this.taskEnvironment());
     this.updateReporting();
   }
   /** Optional batch-ASR probe at a short pause. No provisional transcript enters
@@ -251,6 +269,7 @@ export class RoomController {
     this.reporting?.setForeground(this.sessionId, true);
     const intent = speechIntent(text, this.config.botName, this.members.values(), this.config.speechLanguage);
     if (intent.stop) { this.stop(); return; }
+    if (this.preparing?.taskOnly) this.yieldProactive();
     this.add({ at, end, kind: 'speech', userId: member.id, name: member.name, text: text.trim().slice(0, 4000), attention: intent.kind });
     const eventId = this.sequence, turn = this.preparing;
     if (intent.kind !== 'backchannel') {
@@ -303,6 +322,21 @@ export class RoomController {
   }
   get contextMetrics() { return this.brain.contextMetrics?.(this.sessionId); }
   get activeSpeakers() { return this.active.size; }
+  private taskEnvironment(): TaskEnvironment {
+    return { members: new Set(this.members.keys()), listeners: new Set([...this.members.keys()].filter(id => !this.states.get(id)?.deafened)),
+      lastHumanAt: this.lastHumanAt, humanSpeaking: !!this.active.size || !!this.pendingSTT, lastBotAt: this.lastAudibleAt || -Infinity };
+  }
+  private yieldProactive() {
+    const turn = this.preparing;
+    if (!turn?.taskOnly) return;
+    turn.superseded = true; turn.abort.abort(); this.player.stop();
+  }
+  private invalidateTasks() {
+    const turn = this.preparing;
+    if (turn?.taskRuns?.some(run => !this.tasks.valid(run, this.taskEnvironment()))) {
+      turn.superseded = true; turn.abort.abort(); this.player.stop();
+    }
+  }
   private updateReporting() {
     this.reporting?.setForeground(this.sessionId, this.phase !== 'closed' &&
       (this.busy || !!this.active.size || !!this.pendingSTT || this.phase !== 'paused' && !!this.pendingIntents.size));
@@ -332,6 +366,7 @@ export class RoomController {
     const acquired = (forcedEntry: boolean) => this.trace({ session: this.sessionId, stage: 'floor_acquired', elapsedMs: this.now() - began, forcedEntry });
     for (;;) {
       turn.abort.signal.throwIfAborted();
+      this.invalidateTasks(); turn.abort.signal.throwIfAborted();
       if (![...turn.sources].some(id => this.members.has(id))) throw new FloorUnavailable('Participant has left.');
       if (this.now() - turn.started > this.config.maxResponseAgeMs) { this.diagnostics.staleReplies++; throw new FloorUnavailable('Reply became stale before speech started.'); }
       const sourceQuiet = [...turn.sources].every(id => this.now() - (this.lastVoice.get(id) ?? 0) >= gap);
@@ -384,6 +419,8 @@ export class RoomController {
     this.updateReporting();
     if (!this.members.size || this.phase === 'paused' || this.phase === 'closed') return;
     if (!this.canUseContext()) { this.pause(); this.notice(this.t("Chat context permissions changed. Replies paused.")); return; }
+    this.tasks.tick(this.taskEnvironment());
+    this.invalidateTasks();
     this.tools?.tick();
     for (const [id, followup] of this.followups) if (followup.expires < this.now()) { this.pendingIntents.delete(id); this.followups.delete(id); }
     const newSpeech = this.events.filter(e => this.pendingIntents.has(e.id));
@@ -402,6 +439,14 @@ export class RoomController {
       }
       return;
     }
+    const taskOnly = !newSpeech.length;
+    const taskBatch = this.tasks.claim(this.taskEnvironment(), !taskOnly);
+    for (const run of taskBatch) {
+      this.add({ kind: 'tool', userId: run.owner, text: JSON.stringify(this.tasks.describe(run)) });
+      this.tasks.bind(run, this.sequence);
+      this.pendingIntents.set(this.sequence, { kind: 'request', addressed: false, complete: true, detailed: false, stop: false, normalized: '' });
+      newSpeech.push(this.events.find(e => e.id === this.sequence)!);
+    }
     if (!newSpeech.length) return;
     const latest = Math.max(...newSpeech.map(e => e.end ?? e.at));
     const consumed = Math.max(...newSpeech.map(e => e.id));
@@ -410,19 +455,26 @@ export class RoomController {
     this.updateReporting();
     const abort = new AbortController(); this.current = abort;
     const epoch = this.epoch;
-    const canSpeak = () => this.epoch === epoch && !abort.signal.aborted && this.members.size > 0 && this.canUseContext();
+    const canSpeak = () => this.epoch === epoch && !abort.signal.aborted && this.members.size > 0 && this.canUseContext()
+      && taskBatch.every(run => this.tasks.valid(run, this.taskEnvironment()));
     const started = this.now();
     const turn = ++this.turnSequence;
     const focused = newSpeech.filter(e => { const intent = this.pendingIntents.get(e.id)!; return intent.addressed || intent.kind !== 'comment'; });
     const prepared: PreparedTurn = { abort, ids: newSpeech.map(e => e.id), sources: new Set((focused.length ? focused : newSpeech).map(e => e.userId!)), started,
-      addressed: newSpeech.some(e => this.pendingIntents.get(e.id)!.addressed), audible: false, answerReady: false, superseded: false };
+      addressed: newSpeech.some(e => this.pendingIntents.get(e.id)!.addressed), audible: false, answerReady: false, superseded: false,
+      taskRuns: taskBatch, taskOnly: taskOnly && !!taskBatch.length };
     this.preparing = prepared;
-    const localReply = !this.modelOnly && newSpeech.length === 1 ? this.pendingIntents.get(newSpeech[0]!.id)!.localReply : undefined;
+    const directTasks = taskOnly && taskBatch.length > 0 && taskBatch.every(r => this.tasks.get(r.task)?.delivery === 'prepared');
+    const localReply = directTasks ? taskBatch.map(r => {
+      const name = this.members.get(r.owner)?.name ?? '', text = this.tasks.get(r.task)!.text!;
+      return name && !text.startsWith(name) ? `${name}, ${text}` : text;
+    }).join(' ')
+      : !taskBatch.length && !this.modelOnly && newSpeech.length === 1 ? this.pendingIntents.get(newSpeech[0]!.id)!.localReply : undefined;
     const snapshot = this.snapshot();
     snapshot.responsePolicy = { triggerEventIds: [...prepared.ids], maxChars: Math.min(this.config.maxReplyChars,
       newSpeech.some(e => this.pendingIntents.get(e.id)!.detailed) ? this.config.maxReplyChars : this.config.conversationReplyChars), preparingEarly: !this.quiet };
     const triggerTools = [...new Set(newSpeech.filter(e => e.kind === 'tool').flatMap(e => {
-      try { const tool = JSON.parse(e.text).tool; return typeof tool === 'string' && ['message', 'remind', 'cancel_reminder', 'reminders', 'activity', 'members', 'search', 'chat'].includes(tool) ? [tool] : []; } catch { return []; }
+      try { const tool = JSON.parse(e.text).tool; return typeof tool === 'string' && ['message', 'remind', 'cancel_reminder', 'reminders', 'activity', 'members', 'search', 'chat', 'tasks'].includes(tool) ? [tool] : []; } catch { return []; }
     }))].sort().join(',');
     const triggerSpeech = newSpeech.filter(e => e.kind === 'speech').length;
     const triggerMode = triggerTools ? triggerSpeech ? 'mixed' : 'tool' : 'human';
@@ -433,9 +485,13 @@ export class RoomController {
     let output: VoiceOutput | undefined;
     let deliveryRecorded = false;
     let playbackRequestedAt = 0;
+    let taskResults: TaskResult[] = directTasks ? this.tasks.directResults(taskBatch) : [];
+    let taskDelivery: 'complete' | 'interrupted' | 'none' = 'none';
+    let taskSpoke = false;
     const recordDelivery = (played: Playback, text: string) => {
       if (deliveryRecorded || this.phase === 'closed') return;
       deliveryRecorded = true;
+      taskDelivery = played.playedMs > 0 ? played.completed ? 'complete' : 'interrupted' : 'none';
       this.lastPlaybackAt = this.now();
       if (played.playedMs > 0) this.lastAudibleAt = played.endedAt ?? this.lastPlaybackAt;
       const delivery = played.playedMs > 0
@@ -465,7 +521,7 @@ export class RoomController {
       this.phase = 'thinking';
       if (localReply) this.diagnostics.localReplies++; else this.diagnostics.modelCalls++;
       this.diagnostics.lastFirstTextMs = 0; this.diagnostics.lastFirstAudioMs = 0; this.diagnostics.lastTtsMs = 0;
-      const streaming = this.config.streamReplies && !!this.player.playStream;
+      const streaming = !taskBatch.length && this.config.streamReplies && !!this.player.playStream;
       const answerReady = () => {
         prepared.answerReady = true; clearTimeout(prepared.cueTimer);
         if (!prepared.cueStarted) prepared.cueAbort?.abort();
@@ -499,6 +555,8 @@ export class RoomController {
         },
       });
       answerReady();
+      taskResults = directTasks ? taskResults : reply.taskResults ?? [];
+      taskSpoke = reply.speak && !!reply.text;
       this.diagnostics.lastModelMs = this.now() - started;
       log(this.t("Reply: {0}, {1} ms, speak={2}.", this.config.model, this.diagnostics.lastModelMs, reply.speak));
       trace('reply_decision', { speak: reply.speak, chars: reply.text.length, actions: reply.actions?.length ?? 0 });
@@ -508,7 +566,7 @@ export class RoomController {
         ...this.reportEvidence(), { event: 0, kind: 'assistant', text: reply.text },
       ] });
       else if (reply.report) this.reporting?.capture(reply.report, reportContext);
-      const actions = (reply.actions ?? []).filter(a => a.tool === 'search' ? a.continue || reply.speak && !!reply.text
+      const actions = (reply.actions ?? []).filter(a => a.tool === 'search' ? a.run || a.continue || reply.speak && !!reply.text
         : a.tool === 'chat' ? a.op === 'continue' || reply.speak && !!reply.text : true);
       for (const action of actions) trace('tool_action_proposed', { tool: action.tool, sourceEvent: action.event });
       this.tools?.submit(actions, newSpeech, abort.signal);
@@ -569,6 +627,10 @@ export class RoomController {
         if (!deliveryRecorded && played.playedMs > 0) recordDelivery({ ...played, completed: false }, '');
       }
       trace('turn_finished', { aborted: abort.signal.aborted, delivered: deliveryRecorded });
+      this.tasks.release(taskBatch, taskResults, taskDelivery, taskSpoke);
+      for (const event of newSpeech) if (event.kind === 'tool') {
+        try { if (JSON.parse(event.text).tool === 'tasks') this.pendingIntents.delete(event.id); } catch { /* Not a task wake. */ }
+      }
       if (!prepared.superseded) {
         for (const id of prepared.ids) { this.pendingIntents.delete(id); this.followups.delete(id); }
         this.consumedThrough = Math.max(this.consumedThrough, consumed); this.prune();
@@ -585,17 +647,18 @@ export class RoomController {
     this.consumedThrough = this.sequence;
     this.previousTranscript.clear(); this.pendingIntents.clear(); this.previews.clear();
     this.tools?.cancelBackground(); this.followups.clear();
+    this.tasks.stop();
     for (const task of this.transcriptions) task.abort();
     this.current?.abort(); this.player.stop();
     this.lastPlaybackAt = this.now();
     this.updateReporting();
   }
-  pause() { this.stop(); this.phase = 'paused'; }
+  pause() { this.stop(); this.tasks.suspend(true); this.phase = 'paused'; }
   resume() {
     if (!this.canUseContext()) throw new Error(this.t("All VC participants must have access to the context channel. Check permissions or start a new session without chat context."));
-    if (this.phase === 'paused') { this.phase = 'idle'; this.lastHumanAt = this.now(); }
+    if (this.phase === 'paused') { this.phase = 'idle'; this.lastHumanAt = this.now(); this.tasks.suspend(false); }
   }
-  close() { this.stop(); this.tools?.close(); this.phase = 'closed'; this.reporting?.forget(this.sessionId); clearInterval(this.timer); this.active.clear(); this.members.clear(); this.states.clear(); this.lastChat.clear(); this.events.length = 0; this.brain.release?.(this.sessionId); }
+  close() { this.stop(); this.tasks.close(); this.presence.close(); this.tools?.close(); this.phase = 'closed'; this.reporting?.forget(this.sessionId); clearInterval(this.timer); this.active.clear(); this.members.clear(); this.states.clear(); this.lastChat.clear(); this.events.length = 0; this.brain.release?.(this.sessionId); }
   private notice(message: string) {
     if (this.now() - this.lastNoticeAt < 5000) return;
     this.lastNoticeAt = this.now(); this.notify(message);

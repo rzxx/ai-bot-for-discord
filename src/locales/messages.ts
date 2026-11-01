@@ -1,5 +1,14 @@
 /** English source message → Russian. Values never translate user-supplied data. */
 export const ruMessages: Record<string, string> = {
+  'Manage tasks for this voice session': 'Управление задачами голосовой сессии',
+  'Task action': 'Действие с задачей',
+  'Task identifier': 'Идентификатор задачи',
+  'No tasks in this session.': 'В этой сессии нет задач.',
+  'Specify a task identifier.': 'Укажите идентификатор задачи.',
+  'Task updated: {0}.': 'Задача обновлена: {0}.',
+  'Unknown task: {0}.': 'Неизвестная задача: {0}.',
+  'Proactive session tasks': 'Проактивные задачи сессии',
+  'Recurring reminders, activity reactions and silence fillers. Tasks disappear on /leave; generated contributions use model allowance.': 'Повторяющиеся напоминания, реакции на активность и заполнение тишины. Задачи исчезают после /leave; новые реплики расходуют лимит модели.',
   'Invalid chatTimezone; use an IANA timezone such as UTC or Europe/Moscow.': 'Некорректный chatTimezone: укажите часовой пояс IANA, например UTC или Europe/Moscow.',
   'Chat retrieval: {0}; timezone: {1}.': 'Чтение истории чата: {0}; часовой пояс: {1}.',
   'Defaults to the channel where you use /join. Chat retrieval can read other named channels when asked.': 'По умолчанию канал команды /join. По просьбе можно читать другие явно названные каналы.',

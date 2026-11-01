@@ -27,6 +27,8 @@ export const defaults = {
   memberContext: false, presenceContext: false, chatContext: false, chatTools: false, chatChannelId: '', chatTimezone: 'UTC', messageTools: true, reminderTools: true, webSearch: true,
   messageCooldownSeconds: 180, mentionCooldownSeconds: 900, searchCooldownSeconds: 30, searchTimeoutMs: 8000,
   reportTools: true, backgroundReports: true,
+  taskTools: true, taskMaxTasks: 20, taskMaxPending: 128, taskModelIntervalSeconds: 10,
+  taskHourlyModelLimit: 120, taskSpeechCooldownSeconds: 15,
 };
 export type Config = typeof defaults;
 
@@ -70,7 +72,11 @@ export function validateConfig(c: Config): Config {
   if (c.contextMaxTokens < 1024 || c.contextMaxTokens > 400000) throw new Error(t("contextMaxTokens: 1024 to 400000."));
   if (c.messageCooldownSeconds < 30 || c.mentionCooldownSeconds < 60 || c.searchCooldownSeconds < 10 || c.searchTimeoutMs < 1000 || c.searchTimeoutMs > 15000) throw new Error(t("Tool cooldowns are too short or searchTimeoutMs is outside 1000–15000."));
   if (typeof c.chatChannelId !== 'string' || c.chatChannelId && !/^\d{15,22}$/.test(c.chatChannelId)) throw new Error(t("Invalid chatChannelId."));
-  for (const key of ['memberContext', 'presenceContext', 'chatContext', 'chatTools', 'messageTools', 'reminderTools', 'webSearch', 'reportTools', 'backgroundReports'] as const) if (typeof c[key] !== 'boolean') throw new Error(t("{0} must be true or false.", key));
+  for (const key of ['memberContext', 'presenceContext', 'chatContext', 'chatTools', 'messageTools', 'reminderTools', 'webSearch', 'reportTools', 'backgroundReports', 'taskTools'] as const) if (typeof c[key] !== 'boolean') throw new Error(t("{0} must be true or false.", key));
+  for (const [key, min, max] of [['taskMaxTasks', 1, 100], ['taskMaxPending', 1, 1024], ['taskModelIntervalSeconds', 1, 3600],
+    ['taskHourlyModelLimit', 1, 1000], ['taskSpeechCooldownSeconds', 1, 3600]] as const) {
+    if (!Number.isInteger(c[key]) || c[key] < min || c[key] > max) throw new Error(t("Invalid {0}", key));
+  }
   try {
     if (typeof c.chatTimezone !== 'string' || c.chatTimezone.length > 100 || !c.chatTimezone.trim()) throw new Error();
     new Intl.DateTimeFormat('en', { timeZone: c.chatTimezone });

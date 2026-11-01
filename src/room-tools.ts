@@ -9,15 +9,21 @@ import type { DiagnosticFields } from './telemetry';
 import { validMemberQuery, type MemberQuery, type MemberResult, type MemberResolution } from './member-directory';
 import { withAbort } from './abort';
 import { validChatQuery, type ChatQuery, type ChatAccess } from './chat-retrieval';
+import { TaskRuntime, validTaskDefinition, type TaskDefinition, type TaskEnvironment, type TaskGrant, type TaskTool } from './tasks';
+import { TaskResearch } from './task-research';
 
-export type ToolAction = { tool: 'message'; event: number; text: string; mentions?: string[] }
+export type TaskAction = { tool: 'tasks'; event: number } & (
+  { op: 'create'; definition: TaskDefinition } | { op: 'update'; id: string; definition: TaskDefinition }
+  | { op: 'list' } | { op: 'pause' | 'resume' | 'cancel'; id: string });
+export type ToolAction = ({ tool: 'message'; event: number; text: string; mentions?: string[] }
   | { tool: 'remind'; event: number; seconds: number; text: string }
   | { tool: 'cancel_reminder'; event: number; id: string }
   | { tool: 'reminders'; event: number }
   | { tool: 'activity'; event: number; person: string }
   | ({ tool: 'members'; event: number } & MemberQuery)
   | ({ tool: 'chat'; event: number } & ChatQuery)
-  | { tool: 'search'; event: number; query: string; continue?: string };
+  | { tool: 'search'; event: number; query: string; continue?: string }
+  | TaskAction) & { run?: string };
 interface SearchChain { owner: string; event: number; round: number; expires: number; queries: string[]; seen: SearchResult[]; next?: string }
 export interface ToolReceipt { tool: ToolAction['tool']; event: number; status: string; [key: string]: unknown }
 export interface ToolHost {
@@ -31,12 +37,13 @@ export interface ToolHost {
   limits: Map<string, number>;
   search?: SearchProvider;
   privateTerms?(): string[];
-  reminders?: ReminderAccess;
 }
 export function parseActions(value: unknown): ToolAction[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, 2).filter((a): a is ToolAction => {
     if (!a || typeof a !== 'object' || !Number.isSafeInteger(a.event) || a.event < 1) return false;
+    if (a.run !== undefined && (typeof a.run !== 'string' || !/^o\d{1,10}$/.test(a.run)
+      || !['search', 'activity', 'members', 'message'].includes(a.tool) || a.continue !== undefined)) return false;
     switch (a.tool) {
       case 'message': return typeof a.text === 'string' && a.text.length <= 1200 && (a.mentions === undefined || Array.isArray(a.mentions) && a.mentions.length <= 2 && a.mentions.every((m: unknown) => typeof m === 'string' && m.length <= 40));
       case 'remind': return Number.isInteger(a.seconds) && a.seconds >= 5 && a.seconds <= 86400 && typeof a.text === 'string' && a.text.length <= 600;
@@ -47,6 +54,9 @@ export function parseActions(value: unknown): ToolAction[] {
       case 'chat': return validChatQuery(a);
       case 'search': return typeof a.query === 'string' && a.query.length >= 3 && a.query.length <= 180
         && (a.continue === undefined || typeof a.continue === 'string' && /^q[\da-f]{8}$/.test(a.continue));
+      case 'tasks': return ['create', 'update', 'list', 'pause', 'resume', 'cancel'].includes(a.op)
+        && (['create', 'update'].includes(a.op) ? validTaskDefinition(a.definition) : true)
+        && (['update', 'pause', 'resume', 'cancel'].includes(a.op) ? typeof a.id === 'string' && /^(?:t|r)\d{1,10}$/.test(a.id) : true);
       default: return false;
     }
   });
@@ -61,10 +71,20 @@ export class RoomTools {
   private chain?: SearchChain;
   private jobs = new Set<Promise<void>>();
   private lookups = new Map<AbortController, number>();
+  private research: TaskResearch;
   constructor(private config: Config, private host: ToolHost, private present: (id: string) => boolean,
     private deliver: (owner: string, receipt: ToolReceipt, wake: boolean) => void, private now: () => number = Date.now,
-    private observe: (stage: string, fields: DiagnosticFields) => void = () => {}) {
-    if (host.reminders) this.reminders = host.reminders;
+    private observe: (stage: string, fields: DiagnosticFields) => void = () => {},
+    private tasks?: TaskRuntime, private taskEnvironment?: () => TaskEnvironment) {
+    this.research = new TaskResearch(host.search ?? createWebSearch(), config.searchTimeoutMs, now);
+    if (tasks) this.reminders = {
+      create: (owner, seconds, text, event) => {
+        const task = tasks.create(owner, event, { intent: text, text, delivery: 'prepared', trigger: { kind: 'once', seconds } }, true);
+        return task && { id: task.id, owner, due: task.nextAt!, text: task.text!, event, scope: 'session', destination: '' };
+      },
+      list: owner => tasks.list().filter(t => t.owner === owner && t.id.startsWith('r')).map(t => ({ id: t.id, owner, due: t.nextAt ?? now(), text: t.text!, event: t.event, scope: 'session', destination: '' })),
+      cancel: (owner, id) => tasks.get(id)?.owner === owner && tasks.manage(id, 'cancel'),
+    };
     else {
       this.localReminders = new ReminderScheduler(async reminders => {
         for (const r of reminders) this.deliver(r.owner, { tool: 'remind', event: r.event, status: this.present(r.owner) ? 'due' : 'expired', id: r.id, text: r.text }, this.present(r.owner));
@@ -74,7 +94,7 @@ export class RoomTools {
     }
   }
   get capabilities() {
-    return [...(this.host.members ? ['members'] : this.config.presenceContext ? ['activity'] : []), ...(this.config.chatTools && this.host.chat ? ['chat'] : []), ...(this.config.messageTools ? ['message'] : []), ...(this.config.reminderTools ? ['remind', 'cancel_reminder', 'reminders'] : []), ...(this.config.webSearch ? ['search'] : [])];
+    return [...(this.host.members ? ['members'] : this.config.presenceContext ? ['activity'] : []), ...(this.config.chatTools && this.host.chat ? ['chat'] : []), ...(this.config.messageTools ? ['message'] : []), ...(this.config.reminderTools ? ['remind', 'cancel_reminder', 'reminders'] : []), ...(this.config.webSearch ? ['search'] : []), ...(this.config.taskTools && this.tasks ? ['tasks'] : [])];
   }
   private limited(key: string, ms: number) { return this.now() - (this.host.limits.get(key) ?? -Infinity) < ms; }
   private stamp(key: string) { this.host.limits.set(key, this.now()); }
@@ -91,6 +111,19 @@ export class RoomTools {
   }
   submit(actions: ToolAction[], origins: TurnEvent[], signal: AbortSignal) {
     for (const action of parseActions(actions)) {
+      if (action.run) {
+        const receiptOrigin = origins.some(e => {
+          if (e.kind !== 'tool') return false;
+          try { const r = JSON.parse(e.text); return e.id === action.event && r.tool === 'tasks' && r.status === 'due' && r.run === action.run; } catch { return false; }
+        });
+        const grant = receiptOrigin && this.taskEnvironment && this.tasks?.grant(action.run, action.event, action.tool as TaskTool, this.taskEnvironment());
+        if (!grant || signal.aborted || this.lifetime.signal.aborted) {
+          this.observe('tool_action_rejected', { tool: action.tool, sourceEvent: action.event, reason: 'invalid_task_grant' }); continue;
+        }
+        this.tasks!.waiting(grant);
+        const job = this.run(action, grant.task.owner, grant.signal, undefined, grant).catch(() => {}).finally(() => this.jobs.delete(job));
+        this.jobs.add(job); continue;
+      }
       // Read continuations require an app-issued token and its current receipt.
       // They never authorize a different tool or a write.
       const origin = origins.find(e => e.id === action.event && e.kind === 'speech');
@@ -145,22 +178,43 @@ export class RoomTools {
       this.jobs.add(job);
     }
   }
-  private async run(action: ToolAction, owner: string, turnSignal: AbortSignal, continuation?: SearchChain) {
+  private async run(action: ToolAction, owner: string, turnSignal: AbortSignal, continuation?: SearchChain, task?: TaskGrant) {
     const began = this.now();
     let result = 'canceled';
     this.observe('tool_job_started', { tool: action.tool, sourceEvent: action.event });
-    const lookup = ['members', 'message', 'activity', 'chat'].includes(action.tool) ? new AbortController() : undefined;
+    const lookup = !task && ['members', 'message', 'activity', 'chat'].includes(action.tool) ? new AbortController() : undefined;
     if (lookup) this.lookups.set(lookup, action.event);
     const signal = AbortSignal.any([turnSignal, this.lifetime.signal, ...(lookup ? [lookup.signal] : [])]);
     const report = (status: string, data: Record<string, unknown> = {}, wake = !['sent', 'scheduled', 'canceled'].includes(status)) => {
       result = status;
+      if (task) { this.tasks!.toolResult(task, { ...data, tool: action.tool, status }); return; }
       // Receipt identity/outcome cannot be overwritten by payload fields.
       if (!this.lifetime.signal.aborted && (!lookup || !signal.aborted)) this.deliver(owner, { ...data, tool: action.tool, event: action.event, status }, wake && !signal.aborted && this.present(owner));
     };
     try {
       signal.throwIfAborted();
       if (!this.capabilities.includes(action.tool)) { report('disabled'); return; }
-      if (action.tool === 'message') {
+      if (action.tool === 'tasks') {
+        if (action.op === 'list') { report('ready', { items: this.taskList(), sources: this.tasks!.sourceNames().filter(s => !['spotify', 'activity'].includes(s) || this.config.presenceContext).filter(s => s !== 'chat' || this.config.chatContext) }, true); return; }
+        if (action.op === 'create' || action.op === 'update') {
+          const definition = structuredClone(action.definition);
+          const resolve = (condition: { source: string; subject?: string }) => {
+            if (!['spotify', 'activity', 'chat', 'voice.join', 'voice.leave'].includes(condition.source)) return true;
+            if (condition.subject !== undefined) {
+              const person = this.host.resolvePerson(condition.subject);
+              if (!person) return false;
+              condition.subject = person.id;
+            } else if (['spotify', 'activity'].includes(condition.source)) condition.subject = owner;
+            return true;
+          };
+          if (('source' in definition.trigger && !resolve(definition.trigger)) || !definition.conditions?.every(resolve) && definition.conditions?.length) { report('unknown_person'); return; }
+          if ([definition.trigger, ...definition.conditions ?? []].some(t => 'source' in t && ['spotify', 'activity'].includes(t.source)) && !this.config.presenceContext) { report('source_unavailable'); return; }
+          if ([definition.trigger, ...definition.conditions ?? []].some(t => 'source' in t && t.source === 'chat') && !this.config.chatContext) { report('source_unavailable'); return; }
+          const ok = action.op === 'create' ? this.tasks!.create(owner, action.event, definition) : this.tasks!.manage(action.id, 'update', definition);
+          if (!ok) { report('limit_or_invalid_task'); return; }
+          report(action.op === 'create' ? 'scheduled' : 'updated', { id: typeof ok === 'object' ? ok.id : action.op === 'update' ? action.id : '' });
+        } else report(this.tasks!.manage(action.id, action.op) ? action.op === 'cancel' ? 'canceled' : action.op === 'pause' ? 'paused' : 'resumed' : 'unknown_task', { id: action.id });
+      } else if (action.tool === 'message') {
         if (this.limited(`message:${owner}`, this.config.messageCooldownSeconds * 1000) || this.limited('message:room', 10000)) { report('cooldown'); return; }
         const text = safeText(action.text, 500);
         if (!text) { report('empty'); return; }
@@ -181,11 +235,13 @@ export class RoomTools {
         // before reserving a send, including concurrent requests.
         signal.throwIfAborted();
         if (!this.present(owner)) return;
+        if (task && this.taskEnvironment && !this.tasks!.valid(task.run, this.taskEnvironment())) { report('condition_ended'); return; }
         if (this.limited(`message:${owner}`, this.config.messageCooldownSeconds * 1000) || this.limited('message:room', 10000)) { report('cooldown'); return; }
         if (mentions.some(id => this.limited(`mention:${id}`, this.config.mentionCooldownSeconds * 1000))) { report('mention_cooldown'); return; }
         // Reserve before I/O, including ambiguous failures: never retry a send.
         this.stamp(`message:${owner}`); this.stamp('message:room');
         for (const id of mentions) this.stamp(`mention:${id}`);
+        if (task) task.run.writeAttempted = true;
         await this.host.sendMessage(owner, text, mentions, signal);
         report('sent');
       } else if (action.tool === 'remind') {
@@ -223,6 +279,17 @@ export class RoomTools {
           const name = term.toLowerCase().replaceAll('ё', 'е');
           return name.length >= 3 && normalized.includes(name);
         })) { report('private_query'); return; }
+        if (task) {
+          const key = action.query.toLowerCase().trim().replace(/\s+/g, ' ');
+          if (task.run.searches.length >= 3 || task.run.searches.includes(key)) { report('search_limit'); return; }
+          const response = await this.research.search(action.query, signal, () => {
+            if (this.limited('search:room', this.config.searchCooldownSeconds * 1000)) return false;
+            this.stamp('search:room'); return true;
+          });
+          if (response.status !== 'cooldown') task.run.searches.push(key);
+          report(response.status, { ...(response.results ? { results: response.results } : {}), remainingSearches: 3 - task.run.searches.length });
+          return;
+        }
         if (this.search || !continuation && this.limited('search:room', this.config.searchCooldownSeconds * 1000)) { report('cooldown'); return; }
         if (!continuation) { this.stamp('search:room'); this.chain = undefined; }
         const chain: SearchChain = continuation ?? { owner, event: action.event, round: 0, expires: this.now() + 20000, queries: [], seen: [] };
@@ -248,6 +315,7 @@ export class RoomTools {
               ...(result.published && /^\d{4}-\d{2}-\d{2}$/.test(result.published) ? { published: result.published } : {}) }] : [];
           }).slice(0, 3);
           chain.seen.push(...excerpts);
+          this.research.remember(action.query, excerpts);
           const more = chain.round < 3 && this.now() < chain.expires;
           if (more) { chain.next = 'q' + crypto.randomUUID().replaceAll('-', '').slice(0, 8); this.chain = chain; }
           report(excerpts.length ? 'ready' : 'unavailable', { round: chain.round, ...(more ? { next: chain.next } : {}),
@@ -266,6 +334,11 @@ export class RoomTools {
     }
   }
   tick() { this.localReminders?.tick(); }
-  close() { this.lifetime.abort(); this.cancelBackground(); this.localReminders?.close(); this.used.clear(); }
+  private taskList() {
+    return this.tasks!.list().map(t => ({ id: t.id, intent: t.intent, paused: t.paused, revision: t.revision,
+      trigger: { ...t.trigger, ...('subject' in t.trigger ? { subject: undefined } : {}) }, pendingRuns: t.pendingRuns, state: t.state,
+      ...(t.nextAt !== undefined ? { seconds: Math.max(0, Math.ceil((t.nextAt - this.now()) / 1000)) } : {}) }));
+  }
+  close() { this.lifetime.abort(); this.cancelBackground(); this.research.close(); this.localReminders?.close(); this.used.clear(); }
   async settle() { await Promise.allSettled([...this.jobs]); await this.localReminders?.settle(); }
 }

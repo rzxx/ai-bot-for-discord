@@ -146,6 +146,16 @@ test('selecting Russian localizes setup and persists matching speech defaults wi
   });
 });
 
+test('session task controls are visible and independently configurable', async () => {
+  await withSetup(async f => {
+    expect(await (await fetch(f.url)).text()).toContain('name="tasks" checked');
+    expect((await f.submit({ tasks: 'on' })).status).toBe(303); expect(f.saved()?.taskTools).toBe(true);
+  });
+  await withSetup(async f => {
+    expect((await f.submit({ tasks: '' })).status).toBe(303); expect(f.saved()?.taskTools).toBe(false);
+  });
+});
+
 test('local findings and additional background inference are visible and independently configurable', async () => {
   await withSetup(async f => {
     const page = await (await fetch(f.url)).text();
